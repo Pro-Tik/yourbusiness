@@ -15,21 +15,12 @@ db.serialize(() => {
       website_status TEXT,
       status TEXT DEFAULT 'pending'
     )
-  `);
-
-  db.run(`
-    INSERT OR IGNORE INTO campaign_leads (
-      business_name, category, area, phone, website, address, search_query, website_status
-    )
-    SELECT
-      "Business Name", "Category", "Area", "Phone Number", "Website", "Address", "Search Query", "Website Status"
-    FROM "Untitled spreadsheet - Probaho Targets"
-    WHERE "Phone Number" IS NOT NULL AND "Phone Number" != ''
   `, function(err) {
     if (err) {
-      console.error(err);
+      console.error("[ERROR] Failed to create campaign_leads table:", err);
     } else {
-      console.log(`Database setup complete. Imported leads into campaign_leads. Rows added: ${this.changes}`);
+      console.log("Database setup complete. Scema for 'campaign_leads' verified.");
+      console.log("Note: The data for this campaign has already been populated.");
     }
   });
 });
