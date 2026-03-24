@@ -11,7 +11,6 @@ async function main() {
 
   const rawPhone = args[0];
 
-  // 1. Fetch details from database to prevent AI hallucination and unquoted argument bugs
   const db = new sqlite3.Database('data.sqlite');
   
   const lead = await new Promise((resolve, reject) => {
@@ -20,23 +19,21 @@ async function main() {
       else resolve(row);
     });
   });
-  db.close();
 
   if (!lead) {
     console.error(`[ERROR] No lead found in the database with phone number: ${rawPhone}`);
+    db.close();
     process.exit(1);
   }
 
   const rawName = lead.business_name || '';
   const rawArea = lead.area || '';
 
-  // 2. Sanitize and format the phone number
-  let phone = rawPhone.replace(/\D/g, ''); // Remove non-digit characters
+  let phone = rawPhone.replace(/\D/g, ''); 
   if (phone.startsWith('01') && phone.length === 11) {
     phone = '88' + phone;
   }
 
-  // 3. Fallback logic for missing Name or Area
   const businessName = rawName.trim() !== '' && rawName !== '-' ? rawName.trim() : 'your business';
   const area = rawArea.trim() !== '' && rawArea !== '-' ? rawArea.trim() : 'your area';
 
@@ -66,12 +63,28 @@ Would you like me to send over a quick live demo to see what it could look like?
     */
     console.log(`[MOCK SUCCESS] Sent message to ${phone}`);
     console.log(`Message content: \\n${message}`);
+
+    // Critical Safety Update: Automatically mark as sent upon success to definitively prevent double-texting
+    await new Promise((resolve, reject) => {
+      db.run(`UPDATE campaign_leads SET status = 'sent' WHERE phone = ?`, [rawPhone], function(err) {
+        if (err) {
+          console.error("[WARNING] Failed to update lead status to 'sent' in database:", err.message);
+          reject(err);
+        } else {
+          console.log(`[SUCCESS] Database updated! Lead ${rawPhone} immediately permanently marked as 'sent'.`);
+          resolve();
+        }
+      });
+    });
+
   } catch (error) {
     console.error("[CRITICAL ERROR] Failed to send message:", error.message);
-    console.log("Exiting with failure code to prevent agent from marking as 'sent'.");
+    console.log("Exiting with failure code to prevent any marking.");
+    db.close();
     process.exit(1);
   }
 
+  db.close();
   console.log("Waiting 60 seconds as a mandatory safety delay...");
   await new Promise(r => setTimeout(r, 60000));
 }
