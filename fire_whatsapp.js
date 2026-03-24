@@ -27,8 +27,8 @@ async function main() {
     process.exit(1);
   }
 
-  const name = lead.business_name;
-  const area = lead.area;
+  const rawName = lead.business_name || '';
+  const rawArea = lead.area || '';
 
   // 2. Sanitize and format the phone number
   let phone = rawPhone.replace(/\D/g, ''); // Remove non-digit characters
@@ -37,10 +37,16 @@ async function main() {
   }
 
   // 3. Fallback logic for missing Name or Area
-  const greetingName = name && name.trim() !== '' && name !== '-' ? name.trim() : 'there';
-  const areaText = area && area.trim() !== '' && area !== '-' ? ` in ${area.trim()}` : '';
+  const businessName = rawName.trim() !== '' && rawName !== '-' ? rawName.trim() : 'your business';
+  const area = rawArea.trim() !== '' && rawArea !== '-' ? rawArea.trim() : 'your area';
 
-  const message = `Hello ${greetingName},\n\nWe noticed your business${areaText}. We are offering a special 3,500 BDT promo for our digital marketing services. Would you be interested?`;
+  const message = `Assalamu Walaikum. I know you are busy, so I will keep this under 60 seconds. 
+
+I was searching for top Interior Design firms in ${area} and noticed ${businessName} doesn't have an official website yet.
+
+We are a local agency, and if you are open to it, we can build a highly professional, modern website for your portfolio at a very negotiable price.
+
+Would you like me to send over a quick live demo to see what it could look like?`;
 
   const apiUrl = process.env.EVOLUTION_API_URL || 'http://localhost:8080/message/sendText/{instanceName}';
   const apikey = process.env.EVOLUTION_API_KEY || 'your_api_key';
