@@ -6,7 +6,7 @@ You cannot safely write raw SQL or manage API headers directly. Instead, you MUS
 **CRITICAL NOTE FOR AGENT Initialization:** 
 - **The database is ALREADY set up and populated.** You DO NOT need to run `setup_db.js`.
 - **The message template is hardcoded.** You DO NOT need to draft the message yourself. The `fire_whatsapp.js` script handles parsing the `Business Name` and `Area` dynamically behind the scenes.
-- **The targeting is already filtered.** `fetch_batch.js` is strictly pre-configured to only pull "Interior Designers without websites". 
+- **The targeting is already filtered.** `fetch_batch.js` is strictly pre-configured to automatically pull leads from various business categories who do not have websites. 
 
 ## The Tools
 

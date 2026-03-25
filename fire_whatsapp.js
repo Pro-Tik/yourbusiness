@@ -14,7 +14,7 @@ async function main() {
   const db = new sqlite3.Database('data.sqlite');
   
   const lead = await new Promise((resolve, reject) => {
-    db.get(`SELECT business_name, area FROM campaign_leads WHERE phone = ?`, [rawPhone], (err, row) => {
+    db.get(`SELECT business_name, area, category FROM campaign_leads WHERE phone = ?`, [rawPhone], (err, row) => {
       if (err) reject(err);
       else resolve(row);
     });
@@ -28,6 +28,7 @@ async function main() {
 
   const rawName = lead.business_name || '';
   const rawArea = lead.area || '';
+  const rawCategory = lead.category || 'business';
 
   let phone = rawPhone.replace(/\D/g, ''); 
   if (phone.startsWith('01') && phone.length === 11) {
@@ -36,14 +37,43 @@ async function main() {
 
   const businessName = rawName.trim() !== '' && rawName !== '-' ? rawName.trim() : 'your business';
   const area = rawArea.trim() !== '' && rawArea !== '-' ? rawArea.trim() : 'your area';
+  const category = rawCategory.trim() !== '' ? rawCategory.trim() : 'business';
 
-  const message = `Assalamu Walaikum. I know you are busy, so I will keep this under 60 seconds. 
+  const greetings = ["Assalamu Walaikum.", "Hello!", "Salam!", "Hi there,", "Greetings!"];
+  const subgreetings = ["I know you are busy, so I will keep this under 60 seconds.", "I'll be quick since I know you're busy.", "I won't take much of your time.", "Quick question for you."];
+  const openings = [
+    `I was searching for top ${category} businesses in ${area}`,
+    `I was looking for reliable ${category} services around ${area}`,
+    `I was checking out local ${category} firms in ${area}`,
+    `I was browsing for the best ${category} options in ${area}`
+  ];
+  const issues = [
+    `and noticed ${businessName} doesn't have an official website yet.`,
+    `and realized that ${businessName} is missing a professional website.`,
+    `and couldn't find a modern website for ${businessName}.`,
+    `but saw that ${businessName} does not seem to have an active website.`
+  ];
+  const pitches = [
+    `We are a local agency, and if you are open to it, we can build a highly professional, modern website for your portfolio at a very negotiable price.`,
+    `My team builds premium websites for local businesses. If you're interested, we can create a stunning site for you at an affordable rate.`,
+    `We specialize in web design for local services, and we'd love to build a modern website for your business at a great price.`
+  ];
+  const closings = [
+    `Would you like me to send over a quick live demo to see what it could look like?`,
+    `Can I shoot over a quick demo link to show you what we have in mind?`,
+    `Are you open to seeing a quick preview of what it could look like?`,
+    `Should I send over a quick video demo of the layout?`
+  ];
 
-I was searching for top Interior Design firms in ${area} and noticed ${businessName} doesn't have an official website yet.
+  const randomChoice = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  
+  const message = `${randomChoice(greetings)} ${randomChoice(subgreetings)}
 
-We are a local agency, and if you are open to it, we can build a highly professional, modern website for your portfolio at a very negotiable price.
+${randomChoice(openings)} ${randomChoice(issues)}
 
-Would you like me to send over a quick live demo to see what it could look like?`;
+${randomChoice(pitches)}
+
+${randomChoice(closings)}`;
 
   const instances = process.env.EVOLUTION_INSTANCES ? process.env.EVOLUTION_INSTANCES.split(',') : ['openclaw'];
   const instanceName = instances[Math.floor(Math.random() * instances.length)];

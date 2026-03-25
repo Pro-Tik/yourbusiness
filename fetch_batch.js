@@ -20,10 +20,9 @@ db.get(`SELECT count(*) as count FROM campaign_leads WHERE status = 'sent' AND d
   }
 
   db.all(`
-    SELECT phone, business_name as name, area 
+    SELECT phone, business_name as name, area, category 
     FROM campaign_leads 
     WHERE status = 'pending' 
-    AND category LIKE '%Interior Design%' 
     AND website_status = 'No Website'
     LIMIT 20
   `, [], (fetchErr, rows) => {
