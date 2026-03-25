@@ -45,11 +45,10 @@ We are a local agency, and if you are open to it, we can build a highly professi
 
 Would you like me to send over a quick live demo to see what it could look like?`;
 
-  const apiUrl = process.env.EVOLUTION_API_URL || 'http://localhost:8080/message/sendText/{instanceName}';
-  const apikey = process.env.EVOLUTION_API_KEY || 'your_api_key';
+  const apiUrl = process.env.EVOLUTION_API_URL || 'http://192.168.1.101:8081/message/sendText/openclaw';
+  const apikey = process.env.EVOLUTION_API_KEY || 'e4686f129a08a357780f37b23d9ecb6489019558f2a02eebe';
 
   try {
-    /* 
     const response = await axios.post(apiUrl, {
       number: phone + '@s.whatsapp.net',
       text: message
@@ -59,10 +58,7 @@ Would you like me to send over a quick live demo to see what it could look like?
         'Content-Type': 'application/json'
       }
     });
-    console.log("Message sent successfully:", response.data);
-    */
-    console.log(`[MOCK SUCCESS] Sent message to ${phone}`);
-    console.log(`Message content: \\n${message}`);
+    console.log(`[SUCCESS] Message successfully pushed to Evolution API for ${phone}`);
 
     // Critical Safety Update: Automatically mark as sent upon success to definitively prevent double-texting
     await new Promise((resolve, reject) => {
