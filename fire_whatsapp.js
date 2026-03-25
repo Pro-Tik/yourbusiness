@@ -45,7 +45,10 @@ We are a local agency, and if you are open to it, we can build a highly professi
 
 Would you like me to send over a quick live demo to see what it could look like?`;
 
-  const apiUrl = process.env.EVOLUTION_API_URL || 'http://192.168.1.101:8081/message/sendText/openclaw';
+  const instances = process.env.EVOLUTION_INSTANCES ? process.env.EVOLUTION_INSTANCES.split(',') : ['openclaw'];
+  const instanceName = instances[Math.floor(Math.random() * instances.length)];
+  const baseUrl = process.env.EVOLUTION_API_BASE_URL || 'http://192.168.1.101:8081';
+  const apiUrl = `${baseUrl}/message/sendText/${instanceName}`;
   const apikey = process.env.EVOLUTION_API_KEY || 'e4686f129a08a357780f37b23d9ecb6489019558f2a02eebe';
 
   try {
@@ -58,11 +61,11 @@ Would you like me to send over a quick live demo to see what it could look like?
         'Content-Type': 'application/json'
       }
     });
-    console.log(`[SUCCESS] Message successfully pushed to Evolution API for ${phone}`);
+    console.log(`[SUCCESS] Message successfully pushed via instance ${instanceName} to Evolution API for ${phone}`);
 
     // Critical Safety Update: Automatically mark as sent upon success to definitively prevent double-texting
     await new Promise((resolve, reject) => {
-      db.run(`UPDATE campaign_leads SET status = 'sent' WHERE phone = ?`, [rawPhone], function(err) {
+      db.run(`UPDATE campaign_leads SET status = 'sent', sent_at = CURRENT_TIMESTAMP WHERE phone = ?`, [rawPhone], function(err) {
         if (err) {
           console.error("[WARNING] Failed to update lead status to 'sent' in database:", err.message);
           reject(err);
