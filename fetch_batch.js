@@ -1,7 +1,8 @@
 const sqlite3 = require('sqlite3').verbose();
 const db = new sqlite3.Database('data.sqlite');
 
-const currentHour = new Date().getHours();
+const dhakaTimeString = new Date().toLocaleString("en-US", { timeZone: "Asia/Dhaka" });
+const currentHour = new Date(dhakaTimeString).getHours();
 if (currentHour < 8 || currentHour >= 18) {
   console.log(JSON.stringify({ message: "Outside working hours (8 AM - 6 PM). Sleeping." }));
   process.exit(0);
