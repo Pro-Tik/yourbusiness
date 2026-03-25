@@ -79,14 +79,31 @@ Would you like me to send over a quick live demo to see what it could look like?
 
   } catch (error) {
     console.error("[CRITICAL ERROR] Failed to send message:", error.message);
+    
+    // Mark as failed in DB so we don't infinitely retry the same incorrect number
+    await new Promise((resolve, reject) => {
+      db.run(`UPDATE campaign_leads SET status = 'failed' WHERE phone = ?`, [rawPhone], function(err) {
+        if (err) {
+          console.error("[WARNING] Failed to update lead status to 'failed' in database:", err.message);
+          resolve(); // Resolve anyway to proceed with exit
+        } else {
+          console.log(`[UPDATED] Database updated! Lead ${rawPhone} marked as 'failed'.`);
+          resolve();
+        }
+      });
+    });
+
     console.log("Exiting with failure code to prevent any marking.");
     db.close();
     process.exit(1);
   }
 
   db.close();
-  console.log("Waiting 60 seconds as a mandatory safety delay...");
-  await new Promise(r => setTimeout(r, 60000));
+  const minDelay = 60000;
+  const maxDelay = 180000;
+  const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+  console.log(`Waiting ${Math.floor(randomDelay/1000)} seconds as a mandatory safety random delay...`);
+  await new Promise(r => setTimeout(r, randomDelay));
 }
 
 main().catch(err => {
