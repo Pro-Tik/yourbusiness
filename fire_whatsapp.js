@@ -39,49 +39,192 @@ async function main() {
   const area = rawArea.trim() !== '' && rawArea !== '-' ? rawArea.trim() : 'your area';
   const category = rawCategory.trim() !== '' ? rawCategory.trim() : 'business';
 
-  const greetings = ["Assalamu Walaikum.", "Hello!", "Salam!", "Hi there,", "Greetings!"];
-  const subgreetings = ["I know you are busy, so I will keep this under 60 seconds.", "I'll be quick since I know you're busy.", "I won't take much of your time.", "Quick question for you."];
-  const openings = [
-    `I was searching for top ${category} businesses in ${area}`,
-    `I was looking for reliable ${category} services around ${area}`,
-    `I was checking out local ${category} firms in ${area}`,
-    `I was browsing for the best ${category} options in ${area}`
-  ];
-  const issues = [
-    `and noticed ${businessName} doesn't have an official website yet.`,
-    `and realized that ${businessName} is missing a professional website.`,
-    `and couldn't find a modern website for ${businessName}.`,
-    `but saw that ${businessName} does not seem to have an active website.`
-  ];
-  const pitches = [
-    `We are a local agency, and if you are open to it, we can build a highly professional, modern website for your portfolio at a very negotiable price.`,
-    `My team builds premium websites for local businesses. If you're interested, we can create a stunning site for you at an affordable rate.`,
-    `We specialize in web design for local services, and we'd love to build a modern website for your business at a great price.`
-  ];
-  const closings = [
-    `Would you like me to send over a quick live demo to see what it could look like?`,
-    `Can I shoot over a quick demo link to show you what we have in mind?`,
-    `Are you open to seeing a quick preview of what it could look like?`,
-    `Should I send over a quick video demo of the layout?`
-  ];
-
   const randomChoice = (arr) => arr[Math.floor(Math.random() * arr.length)];
-  
-  const message = `${randomChoice(greetings)} ${randomChoice(subgreetings)}
 
-${randomChoice(openings)} ${randomChoice(issues)}
+  // === SPINTAX POOLS (each axis spins independently) ===
+  const greetings  = ["আসসালামু আলাইকুম", "হ্যালো", "ভাইয়া আসসালামু আলাইকুম", "সালাম", "হ্যালো ভাই"];
+  const timeNow    = ["এখন", "এই মুহূর্তে", "আপাতত"];
+  const timeMonth  = ["এই মাসে", "এই সময়ে", "এখন"];
+  const timeToday  = ["আজকে", "আজ", "এখন"];
+  const timeWeek   = ["এই সপ্তাহে", "এখন", "আজকে"];
 
-${randomChoice(pitches)}
+  const g  = randomChoice(greetings);
+  const tn = randomChoice(timeNow);
+  const tm = randomChoice(timeMonth);
+  const tt = randomChoice(timeToday);
+  const tw = randomChoice(timeWeek);
 
-${randomChoice(closings)}`;
+  // Category-aware micro-commitment hooks — 4 structurally distinct forms per category
+  const cat = category.toLowerCase();
+  let message;
 
-  const instances = process.env.EVOLUTION_INSTANCES ? process.env.EVOLUTION_INSTANCES.split(',') : ['openclaw'];
+  if (cat.includes('interior') || cat.includes('architect') || cat.includes('furniture') || cat.includes('home decor')) {
+    message = randomChoice([
+      `${g}। ${businessName} কি ${area}-তে ${tm} নতুন কোনো ইন্টেরিয়র বা ডিজাইন প্রজেক্টের কাজ নিচ্ছে?`,
+      `${g}। ${area}-এর ${businessName} কি ${tn} নতুন ক্লায়েন্টের ইন্টেরিয়র প্রজেক্ট নিচ্ছে?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName} কি ${tm} ${area}-তে নতুন ডিজাইন প্রজেক্ট নিচ্ছে?`,
+      `${g}। ${area}-তে ${businessName}-এর কি ${tn} নতুন ইন্টেরিয়র কাজ নেওয়ার সুযোগ আছে?`,
+    ]);
+
+  } else if (cat.includes('saloon') || cat.includes('beauty') || cat.includes('spa') || cat.includes('skin')) {
+    message = randomChoice([
+      `${g}। ${businessName} কি ${tt} ${area}-তে নতুন কোনো কাস্টমারের বুকিং বা সিরিয়াল নিচ্ছে?`,
+      `${g}। ${area}-এর ${businessName}-এ কি ${tn} ওয়াক-ইন কাস্টমার নেওয়া হচ্ছে?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName}-এ ${tt} ${area}-তে সিরিয়াল পাওয়া যাবে?`,
+      `${g}। ${area}-তে ${businessName} কি ${tw} নতুন অ্যাপয়েন্টমেন্ট নিচ্ছে?`,
+    ]);
+
+  } else if (cat.includes('hardware') || cat.includes('construction') || cat.includes('pest control') || cat.includes('cleaning')) {
+    message = randomChoice([
+      `${g}। ${businessName} কি ${area}-তে কনস্ট্রাকশন প্রজেক্টের জন্য পাইকারি বা বাল্ক অর্ডারের কাজ নেয়?`,
+      `${g}। ${area}-এর ${businessName} কি বড় কন্ট্রাক্টরদের জন্য ${tn} বাল্ক সাপ্লাই দিয়ে থাকে?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName} কি ${area}-তে বাল্ক মালপত্র সাপ্লাই করে?`,
+      `${g}। ${area}-তে ${businessName} কি ${tm} পাইকারি অর্ডার নিচ্ছে?`,
+    ]);
+
+  } else if (cat.includes('jewelry')) {
+    message = randomChoice([
+      `${g}। ${area}-এর ${businessName}-এ কি কাস্টম ব্রাইডাল সেটের অর্ডার নেওয়া হয়, নাকি শুধু রেডিমেড গয়না বিক্রি হয়?`,
+      `${g}। ${businessName} কি ${area}-তে ${tn} কাস্টম গয়নার অর্ডার নিচ্ছে?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName}-এ কি ${tm} বিশেষ কাস্টম ডিজাইনের গয়না বানানো হয়?`,
+      `${g}। ${area}-তে ${businessName} কি ${tw} কাস্টম জুয়েলারি অর্ডার অ্যাভেইলেবল রাখে?`,
+    ]);
+
+  } else if (cat.includes('restaurant') || cat.includes('cafe') || cat.includes('catering')) {
+    message = randomChoice([
+      `${g}। ${businessName} কি ${area}-তে কর্পোরেট বা বড় গ্রুপের জন্য ${tn} বুকিং বা ক্যাটারিং অর্ডার নিচ্ছে?`,
+      `${g}। ${area}-এর ${businessName}-এ কি ${tw} বিশেষ কোনো অনুষ্ঠানের ক্যাটারিং বুক করা যাবে?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName} কি ${tm} ${area}-তে বড় পার্টির অর্ডার নেয়?`,
+      `${g}। ${area}-তে ${businessName} কি ${tn} গ্রুপ ডাইনিং বা ক্যাটারিং অফার করছে?`,
+    ]);
+
+  } else if (cat.includes('hotel') || cat.includes('resort')) {
+    message = randomChoice([
+      `${g}। ${businessName}-এ কি ${area}-তে ${tw} রুম অ্যাভেইলেবল আছে, নাকি ফুল বুক হয়ে গেছে?`,
+      `${g}। ${area}-এর ${businessName}-এ কি কর্পোরেট গ্রুপের জন্য ${tn} বিশেষ রেট পাওয়া যায়?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName}-এ ${tm} ${area}-তে রুম বুকিং পাওয়া যাবে?`,
+      `${g}। ${area}-তে ${businessName} কি ${tw} গ্রুপ চেক-ইনের জন্য স্পেশাল প্যাকেজ দিচ্ছে?`,
+    ]);
+
+  } else if (cat.includes('real estate') || cat.includes('property')) {
+    message = randomChoice([
+      `${g}। ${businessName} কি ${area}-তে ${tn} নতুন কোনো কমার্শিয়াল বা রেসিডেন্শিয়াল প্রপার্টি বিক্রি বা ভাড়া দিচ্ছে?`,
+      `${g}। ${area}-এ ${businessName}-এর কাছে কি ${tn} ভালো কোনো ফ্ল্যাট বা স্পেস অ্যাভেইলেবল আছে?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName} কি ${tm} ${area}-তে নতুন প্রপার্টি লিস্ট করেছে?`,
+      `${g}। ${area}-তে ${businessName} কি ${tw} কোনো ভালো কমার্শিয়াল স্পেস অফার করছে?`,
+    ]);
+
+  } else if (cat.includes('dental') || cat.includes('eye') || cat.includes('diagnostic') || cat.includes('pharmacy') || cat.includes('physio') || cat.includes('clinic')) {
+    message = randomChoice([
+      `${g}। ${businessName}-এ কি ${area}-তে ${tn} নতুন পেশেন্টের অ্যাপয়েন্টমেন্ট নেওয়া হচ্ছে?`,
+      `${g}। ${area}-এর ${businessName}-এ কি ${tt} ডাক্তারের সিরিয়াল পাওয়া যাবে?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName}-এ ${tw} ${area}-তে ডাক্তার দেখানো যাবে?`,
+      `${g}। ${area}-তে ${businessName} কি ${tn} নতুন পেশেন্ট নিচ্ছে?`,
+    ]);
+
+  } else if (cat.includes('school') || cat.includes('coaching') || cat.includes('training') || cat.includes('kindergarten')) {
+    message = randomChoice([
+      `${g}। ${businessName} কি ${area}-তে ${tn} নতুন স্টুডেন্টের ভর্তি নিচ্ছে?`,
+      `${g}। ${area}-এর ${businessName}-এ কি এই ব্যাচে ${tn} আসন খালি আছে?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName}-এ ${tm} ${area}-তে নতুন ভর্তির সুযোগ আছে?`,
+      `${g}। ${area}-তে ${businessName} কি ${tw} নতুন শিক্ষার্থী নিচ্ছে?`,
+    ]);
+
+  } else if (cat.includes('law') || cat.includes('accounting') || cat.includes('tax') || cat.includes('insurance')) {
+    message = randomChoice([
+      `${g}। ${businessName} কি ${area}-তে ${tn} নতুন কোনো ক্লায়েন্টের কেস বা পরামর্শ নিচ্ছে?`,
+      `${g}। ${area}-এর ${businessName} কি ${tm} নতুন কর্পোরেট ক্লায়েন্ট নিচ্ছে?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName} কি ${tn} ${area}-তে নতুন কেস হাতে নিচ্ছে?`,
+      `${g}। ${area}-তে ${businessName} কি ${tw} কনসালটেশন নেওয়া যাবে?`,
+    ]);
+
+  } else if (cat.includes('gym') || cat.includes('fitness') || cat.includes('yoga')) {
+    message = randomChoice([
+      `${g}। ${businessName}-এ কি ${area}-তে ${tn} নতুন মেম্বার ভর্তি নেওয়া হচ্ছে, নাকি স্লট ফুল?`,
+      `${g}। ${area}-এর ${businessName}-এ কি ${tn} ফ্রি ট্রায়াল সেশনের সুযোগ আছে?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName}-এ ${tm} ${area}-তে নতুন মেম্বারশিপ পাওয়া যাবে?`,
+      `${g}। ${area}-তে ${businessName} কি ${tw} নতুন ব্যাচ শুরু করছে?`,
+    ]);
+
+  } else if (cat.includes('car') || cat.includes('auto')) {
+    message = randomChoice([
+      `${g}। ${businessName} কি ${area}-তে ${tn} সার্ভিসিং বা রিপেয়ারের জন্য নতুন কাস্টমার নিচ্ছে?`,
+      `${g}। ${area}-এর ${businessName}-এ কি ${tn} গাড়ির বুকিং বা টেস্ট ড্রাইভ পাওয়া যাবে?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName}-এ ${tw} ${area}-তে সার্ভিসিং অ্যাপয়েন্টমেন্ট পাওয়া যাবে?`,
+      `${g}। ${area}-তে ${businessName} কি ${tm} নতুন গাড়ির স্টক এনেছে?`,
+    ]);
+
+  } else if (cat.includes('travel')) {
+    message = randomChoice([
+      `${g}। ${businessName} কি ${area}-তে ${tm} কোনো গ্রুপ ট্যুর প্যাকেজ অফার করছে?`,
+      `${g}। ${area}-এর ${businessName}-এ কি কর্পোরেট ট্র্যাভেল বা বিজনেস ট্রিপের প্যাকেজ ${tn} পাওয়া যায়?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName} কি ${tw} ${area}-তে নতুন ট্যুর চালু করেছে?`,
+      `${g}। ${area}-তে ${businessName} কি ${tm} গ্রুপের জন্য বিশেষ ট্র্যাভেল ডিল দিচ্ছে?`,
+    ]);
+
+  } else if (cat.includes('event') || cat.includes('photography')) {
+    message = randomChoice([
+      `${g}। ${businessName} কি ${area}-তে ${tm} নতুন কোনো ইভেন্ট বা শুটিং বুকিং নিচ্ছে?`,
+      `${g}। ${area}-এর ${businessName}-এ কি ${tn} ওয়েডিং বা কর্পোরেট ইভেন্টের বুকিং অ্যাভেইলেবল আছে?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName} কি ${tw} ${area}-তে ইভেন্ট ম্যানেজমেন্ট করে?`,
+      `${g}। ${area}-তে ${businessName} কি ${tm} নতুন প্রজেক্ট নিচ্ছে?`,
+    ]);
+
+  } else if (cat.includes('supermarket') || cat.includes('boutique') || cat.includes('electronics')) {
+    message = randomChoice([
+      `${g}। ${businessName} কি ${area}-তে কর্পোরেট বা বাল্ক অর্ডারের জন্য ${tn} বিশেষ কোনো সুবিধা দিয়ে থাকে?`,
+      `${g}। ${area}-এর ${businessName}-এ কি ${tw} নতুন কোনো স্টক এসেছে?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName}-এ ${tm} ${area}-তে বাল্ক অর্ডারে ছাড় পাওয়া যায়?`,
+      `${g}। ${area}-তে ${businessName} কি ${tn} কর্পোরেট পার্চেজের সুবিধা দিচ্ছে?`,
+    ]);
+
+  } else if (cat.includes('courier')) {
+    message = randomChoice([
+      `${g}। ${businessName} কি ${area}-তে রেগুলার বাল্ক পার্সেল ডেলিভারির জন্য ${tn} বিশেষ রেট দেয়?`,
+      `${g}। ${area}-এর ${businessName} কি ${tn} নতুন বিজনেস অ্যাকাউন্ট নিচ্ছে?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName} কি ${tm} ${area}-তে বাল্ক শিপমেন্টের চুক্তি করে?`,
+      `${g}। ${area}-তে ${businessName} কি ${tw} কর্পোরেট ক্লায়েন্টদের জন্য বিশেষ ডেলিভারি অফার করছে?`,
+    ]);
+
+  } else {
+    message = randomChoice([
+      `${g}। ${businessName} কি ${area}-তে ${tm} নতুন কোনো কাস্টমার বা ক্লায়েন্ট নিচ্ছে?`,
+      `${g}। ${area}-এর ${businessName} কি ${tn} নতুন অর্ডার বা বুকিং নিচ্ছে?`,
+      `${g}। একটু জানতে চাইছিলাম — ${businessName} কি ${tw} ${area}-তে নতুন কাজ নিচ্ছে?`,
+      `${g}। ${area}-তে ${businessName} কি ${tm} নতুন ক্লায়েন্ট নেওয়া শুরু করেছে?`,
+    ]);
+  }
+
+  const HARDCODED_INSTANCES = ['openclaw']; // Add more instance names here for pool rotation
+  const instances = process.env.EVOLUTION_INSTANCES
+    ? process.env.EVOLUTION_INSTANCES.split(',').map(s => s.trim()).filter(Boolean)
+    : HARDCODED_INSTANCES;
   const instanceName = instances[Math.floor(Math.random() * instances.length)];
   const baseUrl = process.env.EVOLUTION_API_BASE_URL || 'http://192.168.1.101:8081';
   const apiUrl = `${baseUrl}/message/sendText/${instanceName}`;
   const apikey = process.env.EVOLUTION_API_KEY || 'e4686f129a08a357780f37b23d9ecb6489019558f2a02eebe';
 
   try {
+    // Advanced Simulation: Send "composing" (typing) status for 3-7 seconds before message
+    try {
+      const presenceUrl = `${baseUrl}/chat/presenceUpdate/${instanceName}`;
+      await axios.post(presenceUrl, {
+        number: phone + '@s.whatsapp.net',
+        presence: 'composing'
+      }, { 
+        headers: { 
+          'apikey': apikey,
+          'Content-Type': 'application/json'
+        } 
+      });
+      
+      const typingSeconds = Math.floor(Math.random() * (7 - 3 + 1)) + 3;
+      console.log(`[SIMULATION] Showing "typing..." status for ${typingSeconds} seconds...`);
+      await new Promise(r => setTimeout(r, typingSeconds * 1000));
+    } catch (presenceErr) {
+      console.log(`[WARNING] Presence simulation failed (ignoring): ${presenceErr.message}`);
+    }
+
     const response = await axios.post(apiUrl, {
       number: phone + '@s.whatsapp.net',
       text: message
@@ -127,12 +270,27 @@ ${randomChoice(closings)}`;
     process.exit(1);
   }
 
-  db.close();
-  const minDelay = 60000;
-  const maxDelay = 180000;
+  // Safety: Mandatory random delay between messages (now increased to 3-7 minutes)
+  const minDelay = 180000;  // 3 minutes
+  const maxDelay = 420000;  // 7 minutes
   const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
   console.log(`Waiting ${Math.floor(randomDelay/1000)} seconds as a mandatory safety random delay...`);
   await new Promise(r => setTimeout(r, randomDelay));
+
+  // Protocol: Long Break after every 7 messages sent today to break patterns
+  const sentToday = await new Promise((resolve) => {
+    db.get(`SELECT count(*) as count FROM campaign_leads WHERE status = 'sent' AND date(sent_at, 'localtime') = date('now', 'localtime')`, [], (err, row) => {
+      resolve(row ? row.count : 0);
+    });
+  });
+
+  if (sentToday > 0 && sentToday % 7 === 0) {
+    const breakMins = Math.floor(Math.random() * (40 - 20 + 1)) + 20;
+    console.log(`[LONG BREAK] ${sentToday} messages sent today. Taking a ${breakMins} minute human-like break...`);
+    await new Promise(r => setTimeout(r, breakMins * 60000));
+  }
+
+  db.close();
 }
 
 main().catch(err => {
