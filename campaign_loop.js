@@ -138,7 +138,15 @@ function getNextLead() {
         [],
         (err, row) => {
           if (err) { db.close(); return reject(err); }
-          const dailyLimit = Math.floor(Math.random() * (24 - 18 + 1)) + 18;
+          // Daily limit check — scales with number of active instances
+          // Each instance has a safe limit of 18–24 messages/day
+          // ACTIVE_INSTANCES is set by the parent campaign_loop when calling getNextLead
+          const activeInstances = (process.env.ACTIVE_INSTANCES || process.env.EVOLUTION_INSTANCES || 'openclaw')
+            .split(',').map(s => s.trim()).filter(Boolean);
+          const perInstanceMin = 18;
+          const perInstanceMax = 24;
+          const instanceCount = Math.max(1, activeInstances.length);
+          const dailyLimit = (Math.floor(Math.random() * (perInstanceMax - perInstanceMin + 1)) + perInstanceMin) * instanceCount;
           const sentToday = row ? row.count : 0;
 
           if (sentToday >= dailyLimit) {
@@ -204,12 +212,49 @@ async function run() {
   await tg.campaignStart(initPending);
 
   while (true) {
-    // ── Instance health check before each cycle ──
+    // ── Step 1: Discover connected instances ──────────────────────────────────
     const healthyInstances = await getHealthyInstances();
     if (healthyInstances.length === 0) {
       log('[CRITICAL] No healthy instances available! Sleeping 5 min...');
       await tg.send('🚨 CRITICAL: All WhatsApp instances are disconnected! Campaign paused for 5 min.');
       await sleep(5 * 60_000);
+      continue;
+    }
+
+    // ── Step 2: Per-instance daily cap (max 24 messages each) ────────────────
+    const PER_INSTANCE_CAP = 24;
+    const todayCounts = await new Promise(res => {
+      const db = new sqlite3.Database(DB_PATH);
+      db.all(
+        `SELECT sent_by_instance, count(*) as count
+         FROM campaign_leads
+         WHERE status = 'sent'
+         AND date(sent_at, 'localtime') = date('now', 'localtime')
+         AND sent_by_instance IS NOT NULL
+         GROUP BY sent_by_instance`,
+        [],
+        (e, rows) => { db.close(); res(rows || []); }
+      );
+    });
+
+    const sentPerInstance = {};
+    todayCounts.forEach(r => { sentPerInstance[r.sent_by_instance] = r.count; });
+
+    const availableInstances = healthyInstances.filter(inst => {
+      const sent = sentPerInstance[inst] || 0;
+      if (sent >= PER_INSTANCE_CAP) {
+        log(`[CAP] Instance '${inst}' has reached today's cap (${sent}/${PER_INSTANCE_CAP}). Excluding.`);
+        return false;
+      }
+      log(`[CAP] Instance '${inst}': ${sent}/${PER_INSTANCE_CAP} sent today — available.`);
+      return true;
+    });
+
+    if (availableInstances.length === 0) {
+      const totalToday = Object.values(sentPerInstance).reduce((a, b) => a + b, 0);
+      log(`[CAP] All instances have hit their daily cap (${totalToday} total sent today). Sleeping until tomorrow.`);
+      await tg.sleeping('All instances at daily cap', POLL_INTERVAL_MINUTES);
+      await sleep(POLL_INTERVAL_MINUTES * 60_000);
       continue;
     }
 
@@ -241,11 +286,11 @@ async function run() {
       continue;
     }
 
-    log(`→ Firing message to ${phone} (active: ${healthyInstances.join(', ')})`);
+    log(`→ Firing message to ${phone} (available: ${availableInstances.join(', ')})`);
     try {
       execSync(`node fire_whatsapp.js ${phone}`, {
         stdio: 'inherit',
-        env: { ...process.env, ACTIVE_INSTANCES: healthyInstances.join(',') }
+        env: { ...process.env, ACTIVE_INSTANCES: availableInstances.join(',') }
       });
     } catch (err) {
       log(`[WARNING] fire_whatsapp.js exited non-zero for ${phone}.`);
