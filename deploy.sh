@@ -7,6 +7,19 @@ cd "$REPO_DIR" || exit 1
 
 echo "[$(date)] Checking for updates..."
 
+# --- NEW: Safety Backup ---
+if [ -f "data.sqlite" ]; then
+    BACKUP_DIR="backups"
+    mkdir -p "$BACKUP_DIR"
+    BACKUP_FILE="$BACKUP_DIR/data_$(date +%Y%m%d_%H%M%S).sqlite.bak"
+    cp data.sqlite "$BACKUP_FILE"
+    echo "[$(date)] Created safety backup: $BACKUP_FILE"
+    
+    # Keep only the last 10 backups to save space
+    ls -tp "$BACKUP_DIR"/data_*.sqlite.bak | grep -v '/$' | tail -n +11 | xargs -I {} rm -- {}
+fi
+# --------------------------
+
 # Fetch latest changes from origin
 git fetch origin main
 
