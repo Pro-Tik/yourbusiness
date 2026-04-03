@@ -15,6 +15,9 @@ const migrations = [
     `ALTER TABLE campaign_leads ADD COLUMN auto_replied INTEGER DEFAULT 0`,
     // v2: Atomic lead claiming — prevents race conditions with multiple workers
     `ALTER TABLE campaign_leads ADD COLUMN claimed_at DATETIME`,
+    // v3: Retry logic (Phase A)
+    `ALTER TABLE campaign_leads ADD COLUMN retry_count INTEGER DEFAULT 0`,
+    `ALTER TABLE campaign_leads ADD COLUMN last_failed_at DATETIME`,
 ];
 
 db.serialize(() => {

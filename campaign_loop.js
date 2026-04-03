@@ -1,37 +1,69 @@
 /**
  * campaign_loop.js
- * 
- * Autonomous WhatsApp outreach campaign runner.
- * Runs continuously inside Docker — fetches pending leads, fires messages
- * one-by-one (fire_whatsapp.js handles its own per-message delays),
- * then sleeps and polls again until all leads are exhausted.
+ *
+ * Autonomous WhatsApp outreach campaign runner — v3
+ * Features:
+ *   - Atomic lead claiming (BEGIN IMMEDIATE) — race-condition safe
+ *   - Watchdog resets stale in_progress claims after 15 min
+ *   - Instance health check before every send cycle
+ *   - Retry failed leads up to 2x with 24h gap
+ *   - Telegram notifications for all key events
  */
 
 require('dotenv').config();
 const { execSync } = require('child_process');
+const axios = require('axios');
 const sqlite3 = require('sqlite3').verbose();
+const tg = require('./telegram');
 
-// ── Config ──────────────────────────────────────────────────────────────────
-const POLL_INTERVAL_MINUTES = 5;   // How long to wait when no leads are ready
+// ── Config ───────────────────────────────────────────────────────────────────
+const POLL_INTERVAL_MINUTES = 5;
 const DB_PATH = process.env.DB_PATH || 'data.sqlite';
+const BASE_URL = process.env.EVOLUTION_API_BASE_URL || 'http://192.168.1.101:8081';
+const API_KEY = process.env.EVOLUTION_API_KEY || '';
+const INSTANCES = (process.env.EVOLUTION_INSTANCES || 'openclaw')
+  .split(',').map(s => s.trim()).filter(Boolean);
+const MAX_RETRIES = 2;
+const RETRY_GAP_HOURS = 24;
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function log(msg) {
   const ts = new Date().toLocaleString('en-US', { timeZone: 'Asia/Dhaka' });
   console.log(`[${ts}] ${msg}`);
 }
 
+// ── Phase A: Instance Health Check ───────────────────────────────────────────
 /**
- * Atomically claims the next available lead using BEGIN IMMEDIATE.
- * Returns the phone number, or null if none available.
- *
- * Uses 'in_progress' status to prevent two workers from claiming the same lead.
- * A watchdog first resets any stale in_progress claims older than 15 minutes.
+ * Check which instances are connected to WhatsApp.
+ * Returns array of healthy instance names.
  */
+async function getHealthyInstances() {
+  const healthy = [];
+  for (const inst of INSTANCES) {
+    try {
+      const res = await axios.get(
+        `${BASE_URL}/instance/connectionState/${inst}`,
+        { headers: { apikey: API_KEY }, timeout: 5000 }
+      );
+      // Evolution API returns state: 'open' when connected
+      const state = res.data?.instance?.state || res.data?.state || '';
+      if (state === 'open') {
+        healthy.push(inst);
+      } else {
+        log(`[HEALTH] Instance '${inst}' is NOT connected (state: ${state})`);
+        tg.instanceDown(inst);
+      }
+    } catch (e) {
+      log(`[HEALTH] Instance '${inst}' health check failed: ${e.message}`);
+      tg.instanceDown(inst);
+    }
+  }
+  return healthy;
+}
+
+// ── Phase A: Atomic Lead Claim (with Retry Support) ──────────────────────────
 function getNextLead() {
   return new Promise((resolve, reject) => {
     const db = new sqlite3.Database(DB_PATH);
@@ -41,7 +73,6 @@ function getNextLead() {
     const hour = now.getHours();
     const minute = now.getMinutes();
 
-    // Jittered working hours: 08:00–18:30
     const startMinuteJitter = Math.floor(Math.random() * 31);
     const endMinuteJitter = Math.floor(Math.random() * 31);
     const isTooEarly = hour < 8 || (hour === 8 && minute < startMinuteJitter);
@@ -54,7 +85,7 @@ function getNextLead() {
     }
 
     db.serialize(() => {
-      // Step 1 — Watchdog: reset stale in_progress claims older than 15 minutes
+      // Watchdog: reset stale in_progress claims older than 15 minutes
       db.run(
         `UPDATE campaign_leads SET status = 'pending', claimed_at = NULL
          WHERE status = 'in_progress'
@@ -63,7 +94,17 @@ function getNextLead() {
         (wErr) => { if (wErr) log(`[WATCHDOG WARN] ${wErr.message}`); }
       );
 
-      // Step 2 — Check daily limit (jittered 18-24)
+      // Phase A: Reset failed leads eligible for retry (retry_count < MAX_RETRIES, failed > 24h ago)
+      db.run(
+        `UPDATE campaign_leads SET status = 'pending'
+         WHERE status = 'failed'
+         AND (retry_count IS NULL OR retry_count < ${MAX_RETRIES})
+         AND last_failed_at < datetime('now', '-${RETRY_GAP_HOURS} hours')`,
+        [],
+        (rErr) => { if (rErr) log(`[RETRY-RESET WARN] ${rErr.message}`); }
+      );
+
+      // Daily limit check (jittered 18–24)
       db.get(
         `SELECT count(*) as count FROM campaign_leads
          WHERE status = 'sent' AND date(sent_at, 'localtime') = date('now', 'localtime')`,
@@ -79,14 +120,9 @@ function getNextLead() {
             return resolve(null);
           }
 
-          // Step 3 — Atomic claim: BEGIN IMMEDIATE prevents two workers from
-          // reading the same pending lead simultaneously.
+          // Atomic claim
           db.run('BEGIN IMMEDIATE', (beginErr) => {
-            if (beginErr) {
-              // Another worker has the lock right now — back off
-              db.close();
-              return resolve(null);
-            }
+            if (beginErr) { db.close(); return resolve(null); }
 
             db.get(
               `SELECT phone FROM campaign_leads
@@ -100,9 +136,9 @@ function getNextLead() {
                   return fetchErr ? reject(fetchErr) : resolve(null);
                 }
 
-                // Claim it — no other worker can read this row as pending now
                 db.run(
-                  `UPDATE campaign_leads SET status = 'in_progress', claimed_at = datetime('now')
+                  `UPDATE campaign_leads
+                   SET status = 'in_progress', claimed_at = datetime('now')
                    WHERE phone = ?`,
                   [lead.phone],
                   (updateErr) => {
@@ -127,13 +163,30 @@ function getNextLead() {
   });
 }
 
-// ── Main loop ────────────────────────────────────────────────────────────────
+// ── Main Loop ─────────────────────────────────────────────────────────────────
 async function run() {
-  log('=== Campaign loop started ===');
+  log('=== Campaign loop started (v3) ===');
+
+  // Get initial pending count for startup notification
+  const initPending = await new Promise(res => {
+    const db = new sqlite3.Database(DB_PATH);
+    db.get(`SELECT count(*) as c FROM campaign_leads WHERE status IN ('pending','in_progress')`, [], (e, r) => {
+      db.close(); res(r ? r.c : 0);
+    });
+  });
+  await tg.campaignStart(initPending);
 
   while (true) {
-    let phone;
+    // ── Instance health check before each cycle ──
+    const healthyInstances = await getHealthyInstances();
+    if (healthyInstances.length === 0) {
+      log('[CRITICAL] No healthy instances available! Sleeping 5 min...');
+      await tg.send('🚨 CRITICAL: All WhatsApp instances are disconnected! Campaign paused for 5 min.');
+      await sleep(5 * 60_000);
+      continue;
+    }
 
+    let phone;
     try {
       phone = await getNextLead();
     } catch (err) {
@@ -143,17 +196,16 @@ async function run() {
     }
 
     if (!phone) {
-      // Either outside hours, daily limit hit, or no leads left
       const totalPending = await new Promise(res => {
         const db = new sqlite3.Database(DB_PATH);
         db.get(`SELECT count(*) as c FROM campaign_leads WHERE status = 'pending'`, [], (e, r) => {
-          db.close();
-          res(r ? r.c : 0);
+          db.close(); res(r ? r.c : 0);
         });
       });
 
       if (totalPending === 0) {
         log('All leads processed. Campaign complete. Exiting.');
+        await tg.campaignComplete();
         process.exit(0);
       }
 
@@ -164,20 +216,16 @@ async function run() {
 
     log(`→ Firing message to ${phone}`);
     try {
-      // fire_whatsapp.js handles: presence delay, pre-send check, sending,
-      // DB update (sent/replied/skipped), and the 3-7 min post-send delay.
       execSync(`node fire_whatsapp.js ${phone}`, { stdio: 'inherit' });
     } catch (err) {
-      // Exit code 1: fire_whatsapp.js already marked the lead as 'failed'.
-      // The watchdog in getNextLead() will clean up any 'in_progress' records
-      // that outlive 15 minutes if something crashes mid-script.
-      log(`[WARNING] fire_whatsapp.js exited non-zero for ${phone} — lead marked failed, continuing.`);
+      log(`[WARNING] fire_whatsapp.js exited non-zero for ${phone}.`);
+      // fire_whatsapp.js already updated DB to 'failed' and set last_failed_at
     }
-    // No extra sleep here — fire_whatsapp.js already waits 3–7 minutes
   }
 }
 
-run().catch(err => {
+run().catch(async err => {
   console.error('Fatal error in campaign_loop.js:', err);
+  await tg.send(`💥 FATAL ERROR in campaign_loop.js:\n${err.message}`);
   process.exit(1);
 });

@@ -16,6 +16,7 @@
 require('dotenv').config();
 const axios = require('axios');
 const sqlite3 = require('sqlite3').verbose();
+const tg = require('./telegram');
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const DB_PATH = process.env.DB_PATH || 'data.sqlite';
@@ -23,6 +24,8 @@ const POLL_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const BASE_URL = process.env.EVOLUTION_API_BASE_URL || 'http://192.168.1.101:8081';
 const API_KEY = process.env.EVOLUTION_API_KEY || '';
 const ENABLE_AUTO_REPLY = process.env.ENABLE_AUTO_REPLY === 'true';
+const INSTANCES = (process.env.EVOLUTION_INSTANCES || 'openclaw')
+    .split(',').map(s => s.trim()).filter(Boolean);
 
 // The one-time acknowledgement message when a customer replies
 const AUTO_REPLY_TEXT = `ধন্যবাদ আপনার সাড়া দেওয়ার জন্য! আমরা শীঘ্রই আপনার সাথে যোগাযোগ করব। 🙏`;
@@ -113,6 +116,10 @@ async function poll() {
                         [phone]
                     );
 
+                    // Fetch business name for Telegram notification
+                    const leadInfo = await dbGet(db, `SELECT business_name FROM campaign_leads WHERE phone = ?`, [phone]);
+                    await tg.replyDetected(phone, leadInfo?.business_name || phone, sent_by_instance);
+
                     // Auto-reply: send only once per lead
                     if (ENABLE_AUTO_REPLY && !auto_replied) {
                         try {
@@ -148,11 +155,51 @@ async function poll() {
     }
 }
 
+// ── Phase A: Daily Report ─────────────────────────────────────────────────────
+let lastReportDate = null;
+
+async function sendDailyReportIfDue() {
+    const dhakaStr = new Date().toLocaleString('en-US', { timeZone: 'Asia/Dhaka' });
+    const now = new Date(dhakaStr);
+    const hour = now.getHours();
+    const today = now.toDateString();
+
+    // Send once per day at 18:00 (6 PM Dhaka)
+    if (hour < 18 || lastReportDate === today) return;
+    lastReportDate = today;
+
+    const db = new sqlite3.Database(DB_PATH);
+    try {
+        const [sentToday, replied, pending, failed, inProgress] = await Promise.all([
+            dbGet(db, `SELECT count(*) as c FROM campaign_leads WHERE status='sent' AND date(sent_at,'localtime')=date('now','localtime')`, []),
+            dbGet(db, `SELECT count(*) as c FROM campaign_leads WHERE status='replied'`, []),
+            dbGet(db, `SELECT count(*) as c FROM campaign_leads WHERE status='pending'`, []),
+            dbGet(db, `SELECT count(*) as c FROM campaign_leads WHERE status='failed'`, []),
+            dbGet(db, `SELECT count(*) as c FROM campaign_leads WHERE status='in_progress'`, []),
+        ]);
+        await tg.dailyReport({
+            sentToday: sentToday?.c || 0,
+            replied: replied?.c || 0,
+            pending: pending?.c || 0,
+            failed: failed?.c || 0,
+            inProgress: inProgress?.c || 0,
+            instances: INSTANCES,
+        });
+        log('Daily report sent to Telegram.');
+    } catch (e) {
+        log(`[ERROR] Daily report failed: ${e.message}`);
+    } finally {
+        db.close();
+    }
+}
+
 // ── Main Loop ─────────────────────────────────────────────────────────────────
 async function run() {
     log('=== Reply Poller started ===');
+    await tg.send('📡 Reply Poller started — checking for replies every 15 min.');
     while (true) {
         await poll();
+        await sendDailyReportIfDue();
         log(`Sleeping ${POLL_INTERVAL_MS / 60000} minutes until next check...`);
         await sleep(POLL_INTERVAL_MS);
     }

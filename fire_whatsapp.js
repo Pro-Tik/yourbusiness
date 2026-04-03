@@ -1,6 +1,7 @@
 require('dotenv').config();
 const axios = require('axios');
 const sqlite3 = require('sqlite3').verbose();
+const tg = require('./telegram');
 
 async function main() {
   const args = process.argv.slice(2);
@@ -226,6 +227,7 @@ async function main() {
             `UPDATE campaign_leads SET status = 'replied', replied_at = CURRENT_TIMESTAMP WHERE phone = ?`,
             [rawPhone], r
           ));
+          await tg.leadSkipped(rawPhone, `Already replied via instance '${inst}'`);
           db.close();
           process.exit(0);
         }
@@ -236,6 +238,7 @@ async function main() {
             `UPDATE campaign_leads SET status = 'sent', sent_by_instance = ?, sent_at = CURRENT_TIMESTAMP WHERE phone = ?`,
             [inst, rawPhone], r
           ));
+          await tg.leadSkipped(rawPhone, `Already messaged via instance '${inst}' (DB recovery)`);
           db.close();
           process.exit(0);
         }
@@ -301,23 +304,30 @@ async function main() {
       );
     });
 
+    // Telegram notification
+    await tg.messageSent(rawPhone, instanceName, businessName);
+
   } catch (error) {
     console.error("[CRITICAL ERROR] Failed to send message:", error.message);
+    await tg.messageFailed(rawPhone, error.message);
 
-    // Mark as failed in DB so we don't infinitely retry the same incorrect number
-    await new Promise((resolve, reject) => {
-      db.run(`UPDATE campaign_leads SET status = 'failed' WHERE phone = ?`, [rawPhone], function (err) {
-        if (err) {
-          console.error("[WARNING] Failed to update lead status to 'failed' in database:", err.message);
-          resolve(); // Resolve anyway to proceed with exit
-        } else {
-          console.log(`[UPDATED] Database updated! Lead ${rawPhone} marked as 'failed'.`);
+    // Mark as failed — increment retry_count
+    await new Promise((resolve) => {
+      db.run(
+        `UPDATE campaign_leads
+         SET status = 'failed',
+             last_failed_at = CURRENT_TIMESTAMP,
+             retry_count = COALESCE(retry_count, 0) + 1
+         WHERE phone = ?`,
+        [rawPhone],
+        (err) => {
+          if (err) console.error("[WARNING] Failed to mark lead as failed:", err.message);
+          else console.log(`[UPDATED] Lead ${rawPhone} marked 'failed' (retry_count incremented).`);
           resolve();
         }
-      });
+      );
     });
 
-    console.log("Exiting with failure code to prevent any marking.");
     db.close();
     process.exit(1);
   }
