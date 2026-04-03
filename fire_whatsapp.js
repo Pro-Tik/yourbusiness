@@ -11,20 +11,17 @@ async function main() {
   }
 
   const rawPhone = args[0];
-
-  // Fix #4: Use DB_PATH env var
   const DB_PATH = process.env.DB_PATH || 'data.sqlite';
   const db = new sqlite3.Database(DB_PATH);
 
   const lead = await new Promise((resolve, reject) => {
     db.get(`SELECT business_name, area, category FROM campaign_leads WHERE phone = ?`, [rawPhone], (err, row) => {
-      if (err) reject(err);
-      else resolve(row);
+      if (err) reject(err); else resolve(row);
     });
   });
 
   if (!lead) {
-    console.error(`[ERROR] No lead found in the database with phone number: ${rawPhone}`);
+    console.error(`[ERROR] No lead found for: ${rawPhone}`);
     db.close();
     process.exit(1);
   }
@@ -105,52 +102,39 @@ async function main() {
   }
 
   const HARDCODED_INSTANCES = ['openclaw'];
-  // ACTIVE_INSTANCES provided from campaign_loop
   const activeInstances = (process.env.ACTIVE_INSTANCES || process.env.EVOLUTION_INSTANCES || HARDCODED_INSTANCES.join(','))
     .split(',').map(s => s.trim()).filter(Boolean);
 
-  // ALL instances for pre-send check (Fix #2)
   const allInstances = (process.env.EVOLUTION_INSTANCES || HARDCODED_INSTANCES.join(','))
     .split(',').map(s => s.trim()).filter(Boolean);
 
   const baseUrl = process.env.EVOLUTION_API_BASE_URL || 'http://192.168.1.101:8081';
-  const apikey = process.env.EVOLUTION_API_KEY || 'e4686f129a08a357780f37b23d9ecb6489019558f2a02eebe';
+  const apikey = process.env.EVOLUTION_API_KEY || 'e4686f129a08a35780f37b23d9ecb6489019558f2a02eebe';
 
   // ── Pre-Send History Check ───────────────────────────────────
-  console.log(`[PRE-CHECK] Scanning ${allInstances.length} instance(s) for ${phone}...`);
   for (const inst of allInstances) {
     try {
-      const res = await axios.post(
-        `${baseUrl}/chat/findMessages/${inst}`,
+      const res = await axios.post(`${baseUrl}/chat/findMessages/${inst}`,
         { where: { key: { remoteJid: `${phone}@s.whatsapp.net` } }, limit: 10 },
         { headers: { apikey, 'Content-Type': 'application/json' }, timeout: 8000 }
       );
       const msgs = Array.isArray(res.data) ? res.data : (res.data?.messages || res.data?.records || []);
-
       if (msgs.length > 0) {
-        const hasReply = msgs.some(m => m?.key?.fromMe === false);
-        const hasSent = msgs.some(m => m?.key?.fromMe === true);
-
-        if (hasReply) {
-          console.log(`[PRE-CHECK] Lead ${rawPhone} has REPLIED via instance '${inst}'. Marking as replied.`);
-          await new Promise(r => db.run(`UPDATE campaign_leads SET status = 'replied', replied_at = CURRENT_TIMESTAMP WHERE phone = ?`, [rawPhone], r));
-          await tg.leadSkipped(rawPhone, `Already replied via instance '${inst}'`);
-          db.close();
-          process.exit(0);
+        if (msgs.some(m => m?.key?.fromMe === false)) {
+          await dbRun(db, `UPDATE campaign_leads SET status = 'replied', replied_at = CURRENT_TIMESTAMP WHERE phone = ?`, [rawPhone]);
+          await tg.leadSkipped(rawPhone, `Already replied via '${inst}'`);
+          db.close(); process.exit(0);
         }
-
-        if (hasSent) {
-          console.log(`[PRE-CHECK] Lead ${rawPhone} already messaged via instance '${inst}'. Recovering DB.`);
-          await new Promise(r => db.run(`UPDATE campaign_leads SET status = 'sent', sent_by_instance = ?, sent_at = CURRENT_TIMESTAMP WHERE phone = ?`, [inst, rawPhone], r));
-          await tg.leadSkipped(rawPhone, `Already messaged via instance '${inst}' (DB recovery)`);
-          db.close();
-          process.exit(0);
+        if (msgs.some(m => m?.key?.fromMe === true)) {
+          await dbRun(db, `UPDATE campaign_leads SET status = 'sent', sent_by_instance = ?, sent_at = CURRENT_TIMESTAMP WHERE phone = ?`, [inst, rawPhone]);
+          await tg.leadSkipped(rawPhone, `Already messaged via '${inst}' (recovered)`);
+          db.close(); process.exit(0);
         }
       }
-    } catch (preErr) { console.log(`[PRE-CHECK WARNING] Instance '${inst}' check ignored: ${preErr.message}`); }
+    } catch (e) { }
   }
 
-  // ── Round-Robin (Uses activeInstances ONLY) ────────────────────────────────
+  // ── Round-Robin Selection ────────────────────────────────────
   const instanceName = await new Promise((resolve) => {
     db.serialize(() => {
       db.run(`CREATE TABLE IF NOT EXISTS instance_counter (id INTEGER PRIMARY KEY, counter INTEGER DEFAULT 0)`);
@@ -158,83 +142,70 @@ async function main() {
       db.get(`SELECT counter FROM instance_counter WHERE id = 1`, [], (err, row) => {
         const counter = row ? row.counter : 0;
         const picked = activeInstances[counter % activeInstances.length];
-        const next = counter + 1;
-        db.run(`UPDATE instance_counter SET counter = ? WHERE id = 1`, [next]);
+        db.run(`UPDATE instance_counter SET counter = ? WHERE id = 1`, [counter + 1]);
         resolve(picked);
       });
     });
   });
-  console.log(`[ROUND-ROBIN] Selected: ${instanceName}`);
+  console.log(`[ROUND-ROBIN] Using: ${instanceName}`);
 
   const apiUrl = `${baseUrl}/message/sendText/${instanceName}`;
 
   try {
-    // ── Simulation: Typing ───────────────────────────────────
+    // ── Hybrid Send Logic (Fixes Compatibility) ────────────────
+    let success = false;
+    let errorMsg = '';
+
+    // Attempt 1: Simple Number (e.g. 8801...) — Liked by openclaw2
     try {
-      // Fix: Simplifed 'number' field (no @s.whatsapp.net) to match user's working curl format
-      await axios.post(`${baseUrl}/chat/presenceUpdate/${instanceName}`, {
-        number: phone,
-        presence: 'composing'
-      }, { headers: { 'apikey': apikey, 'Content-Type': 'application/json' } });
+      console.log(`[ATTEMPT 1] Sending to ${phone} (simple format)...`);
+      await axios.post(apiUrl, { number: phone, text: message }, { headers: { apikey, 'Content-Type': 'application/json' }, timeout: 15000 });
+      success = true;
+    } catch (err1) {
+      errorMsg = err1.response?.data?.message || err1.message;
+      console.log(`[ATTEMPT 1 FAILED] ${errorMsg}`);
 
-      const typingSecs = Math.floor(Math.random() * (7 - 3 + 1)) + 3;
-      console.log(`[SIMULATION] Showing "typing..." status for ${typingSecs}s...`);
-      await new Promise(r => setTimeout(r, typingSecs * 1000));
-    } catch (pErr) { console.log(`[WARNING] Presence simulation failed: ${pErr.message}`); }
+      // Attempt 2 Fallback: Extended JID (e.g. 8801...@s.whatsapp.net) — Liked by older/picky sessions like openclaw
+      console.log(`[ATTEMPT 2] Retrying with @s.whatsapp.net suffix...`);
+      try {
+        await axios.post(apiUrl, { number: phone + '@s.whatsapp.net', text: message }, { headers: { apikey, 'Content-Type': 'application/json' }, timeout: 15000 });
+        success = true;
+      } catch (err2) {
+        errorMsg = err2.response?.data?.message || err2.message;
+        console.log(`[ATTEMPT 2 FAILED] ${errorMsg}`);
+      }
+    }
 
-    // ── Send Message ───────────────────────────────────
-    const response = await axios.post(apiUrl, {
-      number: phone, // Fix: Simplified format (no suffix)
-      text: message
-    }, { headers: { 'apikey': apikey, 'Content-Type': 'application/json' } });
+    if (!success) throw new Error(errorMsg);
 
-    console.log(`[SUCCESS] Pushed via ${instanceName} to ${phone}`);
-
-    await new Promise((res, rej) => {
-      db.run(`UPDATE campaign_leads SET status = 'sent', sent_at = CURRENT_TIMESTAMP, sent_by_instance = ? WHERE phone = ?`, [instanceName, rawPhone], (err) => err ? rej(err) : res());
-    });
-
+    console.log(`[SUCCESS] Message sent via ${instanceName}`);
+    await dbRun(db, `UPDATE campaign_leads SET status = 'sent', sent_at = CURRENT_TIMESTAMP, sent_by_instance = ? WHERE phone = ?`, [instanceName, rawPhone]);
     await tg.messageSent(rawPhone, instanceName, businessName);
 
   } catch (error) {
-    const errorMsg = error.response?.data?.message || error.message;
-    console.error("[CRITICAL ERROR] Failed to send:", errorMsg);
-    await tg.messageFailed(rawPhone, errorMsg);
-
-    await new Promise((resolve) => {
-      db.run(`UPDATE campaign_leads SET status = 'failed', last_failed_at = CURRENT_TIMESTAMP, retry_count = COALESCE(retry_count, 0) + 1 WHERE phone = ?`, [rawPhone], () => resolve());
-    });
+    console.error("[CRITICAL ERROR]", error.message);
+    await tg.messageFailed(rawPhone, error.message);
+    await dbRun(db, `UPDATE campaign_leads SET status = 'failed', last_failed_at = CURRENT_TIMESTAMP, retry_count = COALESCE(retry_count, 0) + 1 WHERE phone = ?`, [rawPhone]);
     db.close();
     process.exit(1);
   }
 
-  // Mandatory Safety Delay 3-7 mins
-  const minDelay = 180000;
-  const maxDelay = 420000;
-  const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
-  console.log(`Waiting ${Math.floor(randomDelay / 1000)}s mandatory delay...`);
-  await new Promise(r => setTimeout(r, randomDelay));
+  // Safety Delay & Breaks
+  const delay = Math.floor(Math.random() * (420000 - 180000 + 1)) + 180000;
+  console.log(`Waiting ${Math.floor(delay / 1000)}s delay...`);
+  await new Promise(r => setTimeout(r, delay));
 
-  // Fix #5: Protocol: Long Break after every 7 messages sent by THIS INSTANCE today
-  const sentByThisInstanceToday = await new Promise((resolve) => {
-    db.get(`SELECT count(*) as count FROM campaign_leads WHERE status = 'sent' AND date(sent_at, 'localtime') = date('now', 'localtime') AND sent_by_instance = ?`, [instanceName], (err, row) => resolve(row ? row.count : 0));
-  });
-
-  if (sentByThisInstanceToday > 0 && sentByThisInstanceToday % 7 === 0) {
+  const sentCount = (await dbGet(db, `SELECT count(*) as c FROM campaign_leads WHERE status = 'sent' AND date(sent_at, 'localtime') = date('now', 'localtime') AND sent_by_instance = ?`, [instanceName]))?.c || 0;
+  if (sentCount > 0 && sentCount % 7 === 0) {
     const breakMins = Math.floor(Math.random() * (40 - 20 + 1)) + 20;
-    log(`[LONG BREAK] ${sentByThisInstanceToday} sent by ${instanceName} today. Taking a ${breakMins} min break...`);
+    console.log(`[LONG BREAK] ${sentCount} sent by ${instanceName}. Taking ${breakMins} min break...`);
     await new Promise(r => setTimeout(r, breakMins * 60000));
   }
 
   db.close();
 }
 
-function log(msg) {
-  const ts = new Date().toLocaleString('en-US', { timeZone: 'Asia/Dhaka' });
-  console.log(`[${ts}] ${msg}`);
-}
+function dbRun(db, sql, params) { return new Promise((res, rej) => db.run(sql, params, (e) => e ? rej(e) : res())); }
+function dbGet(db, sql, params) { return new Promise((res, rej) => db.get(sql, params, (e, r) => e ? rej(e) : res(r))); }
 
-main().catch(err => {
-  console.error("Script error:", err);
-  process.exit(1);
-});
+main().catch(err => { console.error("Script error:", err); process.exit(1); });
