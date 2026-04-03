@@ -34,33 +34,60 @@ function log(msg) {
   console.log(`[${ts}] ${msg}`);
 }
 
-// ── Phase A: Instance Health Check ───────────────────────────────────────────
+// ── Instance Auto-Discovery via fetchInstances ────────────────────────────────
 /**
- * Check which instances are connected to WhatsApp.
- * Returns array of healthy instance names.
+ * Fetches all instances from Evolution API and returns only those that are
+ * connected (connectionStatus === 'open').
+ *
+ * If EVOLUTION_INSTANCES is set in .env, only those named instances are used.
+ * If unset, ALL connected instances are used automatically — just add a new
+ * instance to the Evolution API and it will be picked up on the next cycle.
  */
 async function getHealthyInstances() {
-  const healthy = [];
-  for (const inst of INSTANCES) {
-    try {
-      const res = await axios.get(
-        `${BASE_URL}/instance/connectionState/${inst}`,
-        { headers: { apikey: API_KEY }, timeout: 5000 }
-      );
-      // Evolution API returns state: 'open' when connected
-      const state = res.data?.instance?.state || res.data?.state || '';
-      if (state === 'open') {
-        healthy.push(inst);
-      } else {
-        log(`[HEALTH] Instance '${inst}' is NOT connected (state: ${state})`);
-        tg.instanceDown(inst);
-      }
-    } catch (e) {
-      log(`[HEALTH] Instance '${inst}' health check failed: ${e.message}`);
-      tg.instanceDown(inst);
-    }
+  try {
+    const res = await axios.get(
+      `${BASE_URL}/instance/fetchInstances`,
+      { headers: { apikey: API_KEY }, timeout: 8000 }
+    );
+
+    const all = Array.isArray(res.data) ? res.data : [];
+
+    // Filter: connected only
+    const connected = all.filter(i => i.connectionStatus === 'open');
+
+    // Optional: filter by names in EVOLUTION_INSTANCES env var
+    const envFilter = process.env.EVOLUTION_INSTANCES
+      ? process.env.EVOLUTION_INSTANCES.split(',').map(s => s.trim()).filter(Boolean)
+      : null;
+
+    const healthy = connected
+      .filter(i => !envFilter || envFilter.includes(i.name))
+      .map(i => i.name);
+
+    // Log stats for each healthy instance
+    connected.forEach(i => {
+      const filtered = !envFilter || envFilter.includes(i.name);
+      const msgs = i._count?.Message || 0;
+      const num = i.number || i.ownerJid || 'unknown';
+      log(`[HEALTH] ${i.name} (${num}) — ${msgs} msgs total — ${filtered ? '✓ active' : '✗ excluded by env filter'}`);
+    });
+
+    // Alert on any disconnected instance that IS in the env filter
+    all
+      .filter(i => i.connectionStatus !== 'open')
+      .filter(i => !envFilter || envFilter.includes(i.name))
+      .forEach(i => {
+        log(`[HEALTH] Instance '${i.name}' is DOWN (status: ${i.connectionStatus})`);
+        tg.instanceDown(i.name);
+      });
+
+    return healthy;
+  } catch (e) {
+    log(`[HEALTH] fetchInstances failed: ${e.message}. Falling back to env list.`);
+    // Fallback: use env list as-is if the API call itself fails
+    return (process.env.EVOLUTION_INSTANCES || 'openclaw')
+      .split(',').map(s => s.trim()).filter(Boolean);
   }
-  return healthy;
 }
 
 // ── Phase A: Atomic Lead Claim (with Retry Support) ──────────────────────────
@@ -214,12 +241,14 @@ async function run() {
       continue;
     }
 
-    log(`→ Firing message to ${phone}`);
+    log(`→ Firing message to ${phone} (active: ${healthyInstances.join(', ')})`);
     try {
-      execSync(`node fire_whatsapp.js ${phone}`, { stdio: 'inherit' });
+      execSync(`node fire_whatsapp.js ${phone}`, {
+        stdio: 'inherit',
+        env: { ...process.env, ACTIVE_INSTANCES: healthyInstances.join(',') }
+      });
     } catch (err) {
       log(`[WARNING] fire_whatsapp.js exited non-zero for ${phone}.`);
-      // fire_whatsapp.js already updated DB to 'failed' and set last_failed_at
     }
   }
 }

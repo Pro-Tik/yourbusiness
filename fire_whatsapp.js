@@ -197,9 +197,10 @@ async function main() {
   }
 
   const HARDCODED_INSTANCES = ['openclaw'];
-  const instances = process.env.EVOLUTION_INSTANCES
-    ? process.env.EVOLUTION_INSTANCES.split(',').map(s => s.trim()).filter(Boolean)
-    : HARDCODED_INSTANCES;
+  // Prefer ACTIVE_INSTANCES (set by campaign_loop from live health check)
+  // Fall back to EVOLUTION_INSTANCES, then hardcoded default
+  const instances = (process.env.ACTIVE_INSTANCES || process.env.EVOLUTION_INSTANCES || HARDCODED_INSTANCES.join(','))
+    .split(',').map(s => s.trim()).filter(Boolean);
   const baseUrl = process.env.EVOLUTION_API_BASE_URL || 'http://192.168.1.101:8081';
   const apikey = process.env.EVOLUTION_API_KEY || 'e4686f129a08a357780f37b23d9ecb6489019558f2a02eebe';
 
@@ -251,8 +252,24 @@ async function main() {
   console.log(`[PRE-CHECK] No prior contact found. Safe to send.`);
   // ── End Pre-Send Check ────────────────────────────────────────────────────────
 
-  // Pick a random instance to send from
-  const instanceName = instances[Math.floor(Math.random() * instances.length)];
+  // ── Round-Robin Instance Selection ───────────────────────────────────────────
+  // Guaranteed alternation between instances — no streaks, no luck required.
+  // A counter row in the DB is atomically incremented to pick the next instance.
+  const instanceName = await new Promise((resolve) => {
+    db.serialize(() => {
+      // Create the counter table if it doesn't exist
+      db.run(`CREATE TABLE IF NOT EXISTS instance_counter (id INTEGER PRIMARY KEY, counter INTEGER DEFAULT 0)`);
+      db.run(`INSERT OR IGNORE INTO instance_counter (id, counter) VALUES (1, 0)`);
+      db.get(`SELECT counter FROM instance_counter WHERE id = 1`, [], (err, row) => {
+        const counter = row ? row.counter : 0;
+        const picked = instances[counter % instances.length];
+        const next = counter + 1;
+        db.run(`UPDATE instance_counter SET counter = ? WHERE id = 1`, [next]);
+        resolve(picked);
+      });
+    });
+  });
+  console.log(`[ROUND-ROBIN] Selected instance: ${instanceName} (${instances.indexOf(instanceName) + 1}/${instances.length})`);
   const apiUrl = `${baseUrl}/message/sendText/${instanceName}`;
 
   try {
