@@ -81,7 +81,6 @@ async function getHealthyInstances() {
 // ── Atomic Lead Claim ─────────────────────────────────────────────────────────
 /**
  * Handles: working hours, watchdog, retry-reset, and atomic claim.
- * Bug #1 Fix: Redundant daily limit check removed from here.
  */
 function getNextLead() {
   return new Promise((resolve, reject) => {
@@ -94,8 +93,10 @@ function getNextLead() {
 
     const startJitter = Math.floor(Math.random() * 31);
     const endJitter = Math.floor(Math.random() * 31);
+
+    // Working hours: 8 AM to 9 PM (Dhaka Time)
     const isTooEarly = hour < 8 || (hour === 8 && minute < startJitter);
-    const isTooLate = hour > 18 || (hour === 18 && minute > 30 + endJitter);
+    const isTooLate = hour > 21 || (hour === 21 && minute > endJitter);
 
     if (isTooEarly || isTooLate) {
       log(`Outside working hours (${hour}:${String(minute).padStart(2, '0')} Dhaka). Sleeping.`);
@@ -231,7 +232,6 @@ async function run() {
     }
 
     if (!phone) {
-      // Bug #3 Fix: Don't exit if leads are still in_progress or retryable
       const notDone = await new Promise(res => {
         const db = new sqlite3.Database(DB_PATH);
         db.get(
