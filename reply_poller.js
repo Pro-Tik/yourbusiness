@@ -4,13 +4,6 @@
  * Background poller (Phase 3) — runs every 15 minutes.
  * Checks all 'sent' leads against the Evolution API history using the
  * EXACT instance that sent the original message (sent_by_instance column).
- *
- * If a reply is detected after the sent_at timestamp:
- *   → Updates status to 'replied'
- *   → Sends a one-time auto-reply (if ENABLE_AUTO_REPLY=true)
- *   → Sets auto_replied = 1 to prevent duplicate auto-replies
- *
- * Deployed as a second service in docker-compose.yml alongside campaign.
  */
 
 require('dotenv').config();
@@ -20,14 +13,11 @@ const tg = require('./telegram');
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const DB_PATH = process.env.DB_PATH || 'data.sqlite';
-const POLL_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+const POLL_INTERVAL_MS = 15 * 60 * 1000;
 const BASE_URL = process.env.EVOLUTION_API_BASE_URL || 'http://192.168.1.101:8081';
 const API_KEY = process.env.EVOLUTION_API_KEY || '';
 const ENABLE_AUTO_REPLY = process.env.ENABLE_AUTO_REPLY === 'true';
-const INSTANCES = (process.env.EVOLUTION_INSTANCES || 'openclaw')
-    .split(',').map(s => s.trim()).filter(Boolean);
 
-// The one-time acknowledgement message when a customer replies
 const AUTO_REPLY_TEXT = `ধন্যবাদ আপনার সাড়া দেওয়ার জন্য! আমরা শীঘ্রই আপনার সাথে যোগাযোগ করব। 🙏`;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -36,27 +26,10 @@ function log(msg) {
     console.log(`[POLLER] [${ts}] ${msg}`);
 }
 
-function sleep(ms) {
-    return new Promise(r => setTimeout(r, ms));
-}
-
-function dbGet(db, sql, params) {
-    return new Promise((res, rej) =>
-        db.get(sql, params, (e, r) => e ? rej(e) : res(r))
-    );
-}
-
-function dbAll(db, sql, params) {
-    return new Promise((res, rej) =>
-        db.all(sql, params, (e, r) => e ? rej(e) : res(r))
-    );
-}
-
-function dbRun(db, sql, params) {
-    return new Promise((res, rej) =>
-        db.run(sql, params, (e) => e ? rej(e) : res())
-    );
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function dbGet(db, sql, params) { return new Promise((res, rej) => db.get(sql, params, (e, r) => e ? rej(e) : res(r))); }
+function dbAll(db, sql, params) { return new Promise((res, rej) => db.all(sql, params, (e, r) => e ? rej(e) : res(r))); }
+function dbRun(db, sql, params) { return new Promise((res, rej) => db.run(sql, params, (e) => e ? rej(e) : res())); }
 
 // ── Core Poll Logic ───────────────────────────────────────────────────────────
 async function poll() {
@@ -64,133 +37,101 @@ async function poll() {
     const db = new sqlite3.Database(DB_PATH);
 
     try {
-        // Find all leads that were sent and haven't been marked as replied yet
         const leads = await dbAll(db,
-            `SELECT phone, sent_by_instance, sent_at, auto_replied
-       FROM campaign_leads
-       WHERE status = 'sent'
-       AND sent_by_instance IS NOT NULL`,
-            []
+            `SELECT phone, sent_by_instance, sent_at, auto_replied FROM campaign_leads
+       WHERE status = 'sent' AND sent_by_instance IS NOT NULL`, []
         );
 
         log(`Found ${leads.length} sent lead(s) to check for replies.`);
-        let repliedCount = 0;
+        let replenished = 0;
 
         for (const lead of leads) {
             const { phone, sent_by_instance, sent_at, auto_replied } = lead;
 
-            // Normalize phone to E.164
             let normalized = phone.replace(/\D/g, '');
-            if (normalized.startsWith('01') && normalized.length === 11) {
-                normalized = '88' + normalized;
-            }
+            if (normalized.startsWith('01') && normalized.length === 11) normalized = '88' + normalized;
             const jid = `${normalized}@s.whatsapp.net`;
 
             try {
-                const res = await axios.post(
-                    `${BASE_URL}/chat/findMessages/${sent_by_instance}`,
+                const res = await axios.post(`${BASE_URL}/chat/findMessages/${sent_by_instance}`,
                     { where: { key: { remoteJid: jid } }, limit: 20 },
                     { headers: { apikey: API_KEY, 'Content-Type': 'application/json' }, timeout: 8000 }
                 );
 
-                const msgs = Array.isArray(res.data) ? res.data
-                    : (res.data?.messages || res.data?.records || []);
+                const msgs = Array.isArray(res.data) ? res.data : (res.data?.messages || res.data?.records || []);
 
-                // Only count messages received AFTER we sent our outreach
-                const sentDate = sent_at ? new Date(sent_at).getTime() : 0;
+                // Fix #7: Parse sent_at (UTC from SQLite) explicitly to avoid +6h offset error
+                const sentDate = sent_at ? new Date(sent_at + ' Z').getTime() : 0;
                 const replies = msgs.filter(m => {
-                    if (m?.key?.fromMe !== false) return false; // must be FROM the customer
-                    const msgTime = m?.messageTimestamp
-                        ? Number(m.messageTimestamp) * 1000
-                        : 0;
+                    if (m?.key?.fromMe !== false) return false;
+                    const msgTime = m?.messageTimestamp ? Number(m.messageTimestamp) * 1000 : 0;
                     return msgTime > sentDate;
                 });
 
                 if (replies.length > 0) {
-                    repliedCount++;
-                    log(`[REPLY DETECTED] ${phone} replied via instance '${sent_by_instance}'.`);
+                    replenished++;
+                    log(`[REPLY DETECTED] ${phone} replied via '${sent_by_instance}'.`);
 
-                    await dbRun(db,
-                        `UPDATE campaign_leads SET status = 'replied', replied_at = CURRENT_TIMESTAMP
-             WHERE phone = ?`,
-                        [phone]
-                    );
-
-                    // Fetch business name for Telegram notification
+                    await dbRun(db, `UPDATE campaign_leads SET status = 'replied', replied_at = CURRENT_TIMESTAMP WHERE phone = ?`, [phone]);
                     const leadInfo = await dbGet(db, `SELECT business_name FROM campaign_leads WHERE phone = ?`, [phone]);
                     await tg.replyDetected(phone, leadInfo?.business_name || phone, sent_by_instance);
 
-                    // Auto-reply: send only once per lead
                     if (ENABLE_AUTO_REPLY && !auto_replied) {
                         try {
-                            await axios.post(
-                                `${BASE_URL}/message/sendText/${sent_by_instance}`,
+                            await axios.post(`${BASE_URL}/message/sendText/${sent_by_instance}`,
                                 { number: jid, text: AUTO_REPLY_TEXT },
                                 { headers: { apikey: API_KEY, 'Content-Type': 'application/json' }, timeout: 8000 }
                             );
-                            await dbRun(db,
-                                `UPDATE campaign_leads SET auto_replied = 1 WHERE phone = ?`,
-                                [phone]
-                            );
-                            log(`[AUTO-REPLY SENT] Sent acknowledgement to ${phone} via '${sent_by_instance}'.`);
-                        } catch (arErr) {
-                            log(`[AUTO-REPLY ERROR] Failed to send auto-reply to ${phone}: ${arErr.message}`);
-                        }
+                            await dbRun(db, `UPDATE campaign_leads SET auto_replied = 1 WHERE phone = ?`, [phone]);
+                            log(`[AUTO-REPLY SENT] Sent to ${phone} via '${sent_by_instance}'.`);
+                        } catch (arErr) { log(`[AUTO-REPLY ERROR] ${arErr.message}`); }
                     }
                 }
-            } catch (apiErr) {
-                // Non-fatal: skip this lead, try again next cycle
-                log(`[API WARN] Could not check history for ${phone} on '${sent_by_instance}': ${apiErr.message}`);
-            }
-
-            // Small delay between API calls to avoid hammering the server
+            } catch (apiErr) { log(`[API WARN] ${phone} on '${sent_by_instance}': ${apiErr.message}`); }
             await sleep(500);
         }
-
-        log(`Cycle complete. ${repliedCount} new reply(ies) detected.`);
-    } catch (err) {
-        log(`[ERROR] Poll cycle failed: ${err.message}`);
-    } finally {
-        db.close();
-    }
+        log(`Cycle complete. ${replenished} new reply(ies) detected.`);
+    } catch (err) { log(`[ERROR] Poll cycle failed: ${err.message}`); } finally { db.close(); }
 }
 
-// ── Phase A: Daily Report ─────────────────────────────────────────────────────
+// ── Daily Report Logic ────────────────────────────────────────────────────────
 let lastReportDate = null;
 
 async function sendDailyReportIfDue() {
     const dhakaStr = new Date().toLocaleString('en-US', { timeZone: 'Asia/Dhaka' });
     const now = new Date(dhakaStr);
-    const hour = now.getHours();
-    const today = now.toDateString();
-
-    // Send once per day at 18:00 (6 PM Dhaka)
-    if (hour < 18 || lastReportDate === today) return;
-    lastReportDate = today;
+    if (now.getHours() < 18 || lastReportDate === now.toDateString()) return;
+    lastReportDate = now.toDateString();
 
     const db = new sqlite3.Database(DB_PATH);
     try {
-        const [sentToday, replied, pending, failed, inProgress] = await Promise.all([
+        const [sent, replied, pending, failed, inProgress] = await Promise.all([
             dbGet(db, `SELECT count(*) as c FROM campaign_leads WHERE status='sent' AND date(sent_at,'localtime')=date('now','localtime')`, []),
             dbGet(db, `SELECT count(*) as c FROM campaign_leads WHERE status='replied'`, []),
             dbGet(db, `SELECT count(*) as c FROM campaign_leads WHERE status='pending'`, []),
             dbGet(db, `SELECT count(*) as c FROM campaign_leads WHERE status='failed'`, []),
             dbGet(db, `SELECT count(*) as c FROM campaign_leads WHERE status='in_progress'`, []),
         ]);
+
+        // Fix #6: Fetch live instance list for daily report instead of stale startup list
+        let instances = [];
+        try {
+            const res = await axios.get(`${BASE_URL}/instance/fetchInstances`, { headers: { apikey: API_KEY }, timeout: 8000 });
+            instances = (Array.isArray(res.data) ? res.data : []).map(i => `${i.name} (${i.connectionStatus})`);
+        } catch (e) {
+            instances = (process.env.EVOLUTION_INSTANCES || 'openclaw').split(',');
+        }
+
         await tg.dailyReport({
-            sentToday: sentToday?.c || 0,
+            sentToday: sent?.c || 0,
             replied: replied?.c || 0,
             pending: pending?.c || 0,
             failed: failed?.c || 0,
             inProgress: inProgress?.c || 0,
-            instances: INSTANCES,
+            instances: instances,
         });
-        log('Daily report sent to Telegram.');
-    } catch (e) {
-        log(`[ERROR] Daily report failed: ${e.message}`);
-    } finally {
-        db.close();
-    }
+        log('Daily report sent.');
+    } catch (e) { log(`[ERROR] Daily report: ${e.message}`); } finally { db.close(); }
 }
 
 // ── Main Loop ─────────────────────────────────────────────────────────────────
@@ -200,12 +141,9 @@ async function run() {
     while (true) {
         await poll();
         await sendDailyReportIfDue();
-        log(`Sleeping ${POLL_INTERVAL_MS / 60000} minutes until next check...`);
+        log(`Sleeping 15 minutes...`);
         await sleep(POLL_INTERVAL_MS);
     }
 }
 
-run().catch(err => {
-    console.error('[POLLER FATAL]', err);
-    process.exit(1);
-});
+run().catch(err => { console.error('[POLLER FATAL]', err); process.exit(1); });
