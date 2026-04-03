@@ -105,19 +105,19 @@ async function main() {
   }
 
   const HARDCODED_INSTANCES = ['openclaw'];
-  // activeInstances: healthy & under capacity (passed from campaign_loop)
+  // ACTIVE_INSTANCES provided from campaign_loop
   const activeInstances = (process.env.ACTIVE_INSTANCES || process.env.EVOLUTION_INSTANCES || HARDCODED_INSTANCES.join(','))
     .split(',').map(s => s.trim()).filter(Boolean);
 
-  // Fix #2: allInstances: ALL configured instances (used for pre-send history check)
+  // ALL instances for pre-send check (Fix #2)
   const allInstances = (process.env.EVOLUTION_INSTANCES || HARDCODED_INSTANCES.join(','))
     .split(',').map(s => s.trim()).filter(Boolean);
 
   const baseUrl = process.env.EVOLUTION_API_BASE_URL || 'http://192.168.1.101:8081';
   const apikey = process.env.EVOLUTION_API_KEY || 'e4686f129a08a357780f37b23d9ecb6489019558f2a02eebe';
 
-  // ── Pre-Send History Check (Bug #2 Fix) ───────────────────────────────────
-  console.log(`[PRE-CHECK] Scanning ${allInstances.length} instance(s) for prior contact with ${phone}...`);
+  // ── Pre-Send History Check ───────────────────────────────────
+  console.log(`[PRE-CHECK] Scanning ${allInstances.length} instance(s) for ${phone}...`);
   for (const inst of allInstances) {
     try {
       const res = await axios.post(
@@ -132,32 +132,23 @@ async function main() {
         const hasSent = msgs.some(m => m?.key?.fromMe === true);
 
         if (hasReply) {
-          console.log(`[PRE-CHECK] Lead ${rawPhone} has REPLIED via instance '${inst}'. Marking as replied. Skipping.`);
-          await new Promise(r => db.run(
-            `UPDATE campaign_leads SET status = 'replied', replied_at = CURRENT_TIMESTAMP WHERE phone = ?`,
-            [rawPhone], r
-          ));
+          console.log(`[PRE-CHECK] Lead ${rawPhone} has REPLIED via instance '${inst}'. Marking as replied.`);
+          await new Promise(r => db.run(`UPDATE campaign_leads SET status = 'replied', replied_at = CURRENT_TIMESTAMP WHERE phone = ?`, [rawPhone], r));
           await tg.leadSkipped(rawPhone, `Already replied via instance '${inst}'`);
           db.close();
           process.exit(0);
         }
 
         if (hasSent) {
-          console.log(`[PRE-CHECK] Lead ${rawPhone} was already messaged via instance '${inst}'. Recovering DB. Skipping.`);
-          await new Promise(r => db.run(
-            `UPDATE campaign_leads SET status = 'sent', sent_by_instance = ?, sent_at = CURRENT_TIMESTAMP WHERE phone = ?`,
-            [inst, rawPhone], r
-          ));
+          console.log(`[PRE-CHECK] Lead ${rawPhone} already messaged via instance '${inst}'. Recovering DB.`);
+          await new Promise(r => db.run(`UPDATE campaign_leads SET status = 'sent', sent_by_instance = ?, sent_at = CURRENT_TIMESTAMP WHERE phone = ?`, [inst, rawPhone], r));
           await tg.leadSkipped(rawPhone, `Already messaged via instance '${inst}' (DB recovery)`);
           db.close();
           process.exit(0);
         }
       }
-    } catch (preErr) {
-      console.log(`[PRE-CHECK WARNING] Instance '${inst}' check failed (${preErr.message}).`);
-    }
+    } catch (preErr) { console.log(`[PRE-CHECK WARNING] Instance '${inst}' check ignored: ${preErr.message}`); }
   }
-  console.log(`[PRE-CHECK] No prior contact found. Safe to send.`);
 
   // ── Round-Robin (Uses activeInstances ONLY) ────────────────────────────────
   const instanceName = await new Promise((resolve) => {
@@ -173,79 +164,74 @@ async function main() {
       });
     });
   });
-  console.log(`[ROUND-ROBIN] Selected instance: ${instanceName} (${activeInstances.indexOf(instanceName) + 1}/${activeInstances.length})`);
+  console.log(`[ROUND-ROBIN] Selected: ${instanceName}`);
 
   const apiUrl = `${baseUrl}/message/sendText/${instanceName}`;
 
   try {
-    // Typing simulation
+    // ── Simulation: Typing ───────────────────────────────────
     try {
+      // Fix: Simplifed 'number' field (no @s.whatsapp.net) to match user's working curl format
       await axios.post(`${baseUrl}/chat/presenceUpdate/${instanceName}`, {
-        number: phone + '@s.whatsapp.net',
+        number: phone,
         presence: 'composing'
       }, { headers: { 'apikey': apikey, 'Content-Type': 'application/json' } });
 
       const typingSecs = Math.floor(Math.random() * (7 - 3 + 1)) + 3;
-      console.log(`[SIMULATION] Showing "typing..." status for ${typingSecs} seconds...`);
+      console.log(`[SIMULATION] Showing "typing..." status for ${typingSecs}s...`);
       await new Promise(r => setTimeout(r, typingSecs * 1000));
-    } catch (pErr) { console.log(`[WARNING] Presence failed: ${pErr.message}`); }
+    } catch (pErr) { console.log(`[WARNING] Presence simulation failed: ${pErr.message}`); }
 
+    // ── Send Message ───────────────────────────────────
     const response = await axios.post(apiUrl, {
-      number: phone + '@s.whatsapp.net',
+      number: phone, // Fix: Simplified format (no suffix)
       text: message
     }, { headers: { 'apikey': apikey, 'Content-Type': 'application/json' } });
 
-    console.log(`[SUCCESS] Message pushed via ${instanceName} for ${phone}`);
+    console.log(`[SUCCESS] Pushed via ${instanceName} to ${phone}`);
 
-    await new Promise((resolve, reject) => {
-      db.run(
-        `UPDATE campaign_leads SET status = 'sent', sent_at = CURRENT_TIMESTAMP, sent_by_instance = ? WHERE phone = ?`,
-        [instanceName, rawPhone],
-        (err) => err ? reject(err) : resolve()
-      );
+    await new Promise((res, rej) => {
+      db.run(`UPDATE campaign_leads SET status = 'sent', sent_at = CURRENT_TIMESTAMP, sent_by_instance = ? WHERE phone = ?`, [instanceName, rawPhone], (err) => err ? rej(err) : res());
     });
 
     await tg.messageSent(rawPhone, instanceName, businessName);
 
   } catch (error) {
-    console.error("[CRITICAL ERROR] Failed to send message:", error.message);
-    await tg.messageFailed(rawPhone, error.message);
+    const errorMsg = error.response?.data?.message || error.message;
+    console.error("[CRITICAL ERROR] Failed to send:", errorMsg);
+    await tg.messageFailed(rawPhone, errorMsg);
+
     await new Promise((resolve) => {
-      db.run(
-        `UPDATE campaign_leads SET status = 'failed', last_failed_at = CURRENT_TIMESTAMP,
-                retry_count = COALESCE(retry_count, 0) + 1
-         WHERE phone = ?`, [rawPhone], () => resolve()
-      );
+      db.run(`UPDATE campaign_leads SET status = 'failed', last_failed_at = CURRENT_TIMESTAMP, retry_count = COALESCE(retry_count, 0) + 1 WHERE phone = ?`, [rawPhone], () => resolve());
     });
     db.close();
     process.exit(1);
   }
 
-  // Mandatory random delay 3-7 mins
+  // Mandatory Safety Delay 3-7 mins
   const minDelay = 180000;
   const maxDelay = 420000;
   const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
-  console.log(`Waiting ${Math.floor(randomDelay / 1000)}s mandatory safety delay...`);
+  console.log(`Waiting ${Math.floor(randomDelay / 1000)}s mandatory delay...`);
   await new Promise(r => setTimeout(r, randomDelay));
 
   // Fix #5: Protocol: Long Break after every 7 messages sent by THIS INSTANCE today
   const sentByThisInstanceToday = await new Promise((resolve) => {
-    db.get(
-      `SELECT count(*) as count FROM campaign_leads
-       WHERE status = 'sent' AND date(sent_at, 'localtime') = date('now', 'localtime')
-       AND sent_by_instance = ?`,
-      [instanceName],
-      (err, row) => resolve(row ? row.count : 0)
-    );
+    db.get(`SELECT count(*) as count FROM campaign_leads WHERE status = 'sent' AND date(sent_at, 'localtime') = date('now', 'localtime') AND sent_by_instance = ?`, [instanceName], (err, row) => resolve(row ? row.count : 0));
   });
 
   if (sentByThisInstanceToday > 0 && sentByThisInstanceToday % 7 === 0) {
     const breakMins = Math.floor(Math.random() * (40 - 20 + 1)) + 20;
-    console.log(`[LONG BREAK] ${sentByThisInstanceToday} sent by ${instanceName} today. Taking a ${breakMins} min break...`);
+    log(`[LONG BREAK] ${sentByThisInstanceToday} sent by ${instanceName} today. Taking a ${breakMins} min break...`);
     await new Promise(r => setTimeout(r, breakMins * 60000));
   }
 
   db.close();
+}
+
+function log(msg) {
+  const ts = new Date().toLocaleString('en-US', { timeZone: 'Asia/Dhaka' });
+  console.log(`[${ts}] ${msg}`);
 }
 
 main().catch(err => {
