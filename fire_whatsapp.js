@@ -12,7 +12,7 @@ async function main() {
   const rawPhone = args[0];
 
   const db = new sqlite3.Database('data.sqlite');
-  
+
   const lead = await new Promise((resolve, reject) => {
     db.get(`SELECT business_name, area, category FROM campaign_leads WHERE phone = ?`, [rawPhone], (err, row) => {
       if (err) reject(err);
@@ -30,7 +30,7 @@ async function main() {
   const rawArea = lead.area || '';
   const rawCategory = lead.category || 'business';
 
-  let phone = rawPhone.replace(/\D/g, ''); 
+  let phone = rawPhone.replace(/\D/g, '');
   if (phone.startsWith('01') && phone.length === 11) {
     phone = '88' + phone;
   }
@@ -42,13 +42,13 @@ async function main() {
   const randomChoice = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
   // === SPINTAX POOLS (each axis spins independently) ===
-  const greetings  = ["আসসালামু আলাইকুম", "হ্যালো", "ভাইয়া আসসালামু আলাইকুম", "সালাম", "হ্যালো ভাই"];
-  const timeNow    = ["এখন", "এই মুহূর্তে", "আপাতত"];
-  const timeMonth  = ["এই মাসে", "এই সময়ে", "এখন"];
-  const timeToday  = ["আজকে", "আজ", "এখন"];
-  const timeWeek   = ["এই সপ্তাহে", "এখন", "আজকে"];
+  const greetings = ["আসসালামু আলাইকুম", "হ্যালো", "ভাইয়া আসসালামু আলাইকুম", "সালাম", "হ্যালো ভাই"];
+  const timeNow = ["এখন", "এই মুহূর্তে", "আপাতত"];
+  const timeMonth = ["এই মাসে", "এই সময়ে", "এখন"];
+  const timeToday = ["আজকে", "আজ", "এখন"];
+  const timeWeek = ["এই সপ্তাহে", "এখন", "আজকে"];
 
-  const g  = randomChoice(greetings);
+  const g = randomChoice(greetings);
   const tn = randomChoice(timeNow);
   const tm = randomChoice(timeMonth);
   const tt = randomChoice(timeToday);
@@ -195,14 +195,62 @@ async function main() {
     ]);
   }
 
-  const HARDCODED_INSTANCES = ['openclaw']; // Add more instance names here for pool rotation
+  const HARDCODED_INSTANCES = ['openclaw'];
   const instances = process.env.EVOLUTION_INSTANCES
     ? process.env.EVOLUTION_INSTANCES.split(',').map(s => s.trim()).filter(Boolean)
     : HARDCODED_INSTANCES;
-  const instanceName = instances[Math.floor(Math.random() * instances.length)];
   const baseUrl = process.env.EVOLUTION_API_BASE_URL || 'http://192.168.1.101:8081';
-  const apiUrl = `${baseUrl}/message/sendText/${instanceName}`;
   const apikey = process.env.EVOLUTION_API_KEY || 'e4686f129a08a357780f37b23d9ecb6489019558f2a02eebe';
+
+  // ── Pre-Send Multi-Instance History Check (Phase 2) ─────────────────────────
+  // Query ALL instances before sending. If any instance already contacted this
+  // lead or received a reply, update DB and skip.
+  console.log(`[PRE-CHECK] Scanning ${instances.length} instance(s) for prior contact with ${phone}...`);
+  for (const inst of instances) {
+    try {
+      const res = await axios.post(
+        `${baseUrl}/chat/findMessages/${inst}`,
+        { where: { key: { remoteJid: `${phone}@s.whatsapp.net` } }, limit: 10 },
+        { headers: { apikey, 'Content-Type': 'application/json' }, timeout: 8000 }
+      );
+      const msgs = Array.isArray(res.data) ? res.data
+        : (res.data?.messages || res.data?.records || []);
+
+      if (msgs.length > 0) {
+        const hasReply = msgs.some(m => m?.key?.fromMe === false);
+        const hasSent = msgs.some(m => m?.key?.fromMe === true);
+
+        if (hasReply) {
+          console.log(`[PRE-CHECK] Lead ${rawPhone} has REPLIED via instance '${inst}'. Marking as replied. Skipping.`);
+          await new Promise(r => db.run(
+            `UPDATE campaign_leads SET status = 'replied', replied_at = CURRENT_TIMESTAMP WHERE phone = ?`,
+            [rawPhone], r
+          ));
+          db.close();
+          process.exit(0);
+        }
+
+        if (hasSent) {
+          console.log(`[PRE-CHECK] Lead ${rawPhone} was already messaged via instance '${inst}'. Recovering DB. Skipping.`);
+          await new Promise(r => db.run(
+            `UPDATE campaign_leads SET status = 'sent', sent_by_instance = ?, sent_at = CURRENT_TIMESTAMP WHERE phone = ?`,
+            [inst, rawPhone], r
+          ));
+          db.close();
+          process.exit(0);
+        }
+      }
+    } catch (preErr) {
+      // Non-fatal: if the API check fails, we continue cautiously
+      console.log(`[PRE-CHECK WARNING] Instance '${inst}' history check failed (${preErr.message}). Continuing cautiously.`);
+    }
+  }
+  console.log(`[PRE-CHECK] No prior contact found. Safe to send.`);
+  // ── End Pre-Send Check ────────────────────────────────────────────────────────
+
+  // Pick a random instance to send from
+  const instanceName = instances[Math.floor(Math.random() * instances.length)];
+  const apiUrl = `${baseUrl}/message/sendText/${instanceName}`;
 
   try {
     // Advanced Simulation: Send "composing" (typing) status for 3-7 seconds before message
@@ -211,13 +259,13 @@ async function main() {
       await axios.post(presenceUrl, {
         number: phone + '@s.whatsapp.net',
         presence: 'composing'
-      }, { 
-        headers: { 
+      }, {
+        headers: {
           'apikey': apikey,
           'Content-Type': 'application/json'
-        } 
+        }
       });
-      
+
       const typingSeconds = Math.floor(Math.random() * (7 - 3 + 1)) + 3;
       console.log(`[SIMULATION] Showing "typing..." status for ${typingSeconds} seconds...`);
       await new Promise(r => setTimeout(r, typingSeconds * 1000));
@@ -236,25 +284,29 @@ async function main() {
     });
     console.log(`[SUCCESS] Message successfully pushed via instance ${instanceName} to Evolution API for ${phone}`);
 
-    // Critical Safety Update: Automatically mark as sent upon success to definitively prevent double-texting
+    // Mark as sent — record which instance was used
     await new Promise((resolve, reject) => {
-      db.run(`UPDATE campaign_leads SET status = 'sent', sent_at = CURRENT_TIMESTAMP WHERE phone = ?`, [rawPhone], function(err) {
-        if (err) {
-          console.error("[WARNING] Failed to update lead status to 'sent' in database:", err.message);
-          reject(err);
-        } else {
-          console.log(`[SUCCESS] Database updated! Lead ${rawPhone} immediately permanently marked as 'sent'.`);
-          resolve();
+      db.run(
+        `UPDATE campaign_leads SET status = 'sent', sent_at = CURRENT_TIMESTAMP, sent_by_instance = ? WHERE phone = ?`,
+        [instanceName, rawPhone],
+        function (err) {
+          if (err) {
+            console.error("[WARNING] Failed to update lead status to 'sent' in database:", err.message);
+            reject(err);
+          } else {
+            console.log(`[SUCCESS] Lead ${rawPhone} marked 'sent' via instance '${instanceName}'.`);
+            resolve();
+          }
         }
-      });
+      );
     });
 
   } catch (error) {
     console.error("[CRITICAL ERROR] Failed to send message:", error.message);
-    
+
     // Mark as failed in DB so we don't infinitely retry the same incorrect number
     await new Promise((resolve, reject) => {
-      db.run(`UPDATE campaign_leads SET status = 'failed' WHERE phone = ?`, [rawPhone], function(err) {
+      db.run(`UPDATE campaign_leads SET status = 'failed' WHERE phone = ?`, [rawPhone], function (err) {
         if (err) {
           console.error("[WARNING] Failed to update lead status to 'failed' in database:", err.message);
           resolve(); // Resolve anyway to proceed with exit
@@ -274,7 +326,7 @@ async function main() {
   const minDelay = 180000;  // 3 minutes
   const maxDelay = 420000;  // 7 minutes
   const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
-  console.log(`Waiting ${Math.floor(randomDelay/1000)} seconds as a mandatory safety random delay...`);
+  console.log(`Waiting ${Math.floor(randomDelay / 1000)} seconds as a mandatory safety random delay...`);
   await new Promise(r => setTimeout(r, randomDelay));
 
   // Protocol: Long Break after every 7 messages sent today to break patterns

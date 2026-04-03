@@ -26,9 +26,11 @@ function log(msg) {
 }
 
 /**
- * Returns the next pending lead phone number from the database,
- * or null if none remain.  Respects daily limit (18–24) and working
- * hours (08:00–18:00 Dhaka) — the same rules used in fetch_batch.js.
+ * Atomically claims the next available lead using BEGIN IMMEDIATE.
+ * Returns the phone number, or null if none available.
+ *
+ * Uses 'in_progress' status to prevent two workers from claiming the same lead.
+ * A watchdog first resets any stale in_progress claims older than 15 minutes.
  */
 function getNextLead() {
   return new Promise((resolve, reject) => {
@@ -41,46 +43,87 @@ function getNextLead() {
 
     // Jittered working hours: 08:00–18:30
     const startMinuteJitter = Math.floor(Math.random() * 31);
-    const endMinuteJitter   = Math.floor(Math.random() * 31);
+    const endMinuteJitter = Math.floor(Math.random() * 31);
     const isTooEarly = hour < 8 || (hour === 8 && minute < startMinuteJitter);
-    const isTooLate  = hour > 18 || (hour === 18 && minute > 30 + endMinuteJitter);
+    const isTooLate = hour > 18 || (hour === 18 && minute > 30 + endMinuteJitter);
 
     if (isTooEarly || isTooLate) {
-      log(`Outside working hours (${hour}:${String(minute).padStart(2,'0')} Dhaka). Sleeping until next window.`);
+      log(`Outside working hours (${hour}:${String(minute).padStart(2, '0')} Dhaka). Sleeping.`);
       db.close();
       return resolve(null);
     }
 
-    // Check daily limit (jittered 18–24)
-    db.get(
-      `SELECT count(*) as count FROM campaign_leads WHERE status = 'sent' AND date(sent_at, 'localtime') = date('now', 'localtime')`,
-      [],
-      (err, row) => {
-        if (err) { db.close(); return reject(err); }
+    db.serialize(() => {
+      // Step 1 — Watchdog: reset stale in_progress claims older than 15 minutes
+      db.run(
+        `UPDATE campaign_leads SET status = 'pending', claimed_at = NULL
+         WHERE status = 'in_progress'
+         AND claimed_at < datetime('now', '-15 minutes')`,
+        [],
+        (wErr) => { if (wErr) log(`[WATCHDOG WARN] ${wErr.message}`); }
+      );
 
-        const dailyLimit = Math.floor(Math.random() * (24 - 18 + 1)) + 18;
-        const sentToday  = row ? row.count : 0;
+      // Step 2 — Check daily limit (jittered 18-24)
+      db.get(
+        `SELECT count(*) as count FROM campaign_leads
+         WHERE status = 'sent' AND date(sent_at, 'localtime') = date('now', 'localtime')`,
+        [],
+        (err, row) => {
+          if (err) { db.close(); return reject(err); }
+          const dailyLimit = Math.floor(Math.random() * (24 - 18 + 1)) + 18;
+          const sentToday = row ? row.count : 0;
 
-        if (sentToday >= dailyLimit) {
-          log(`Daily limit of ${dailyLimit} reached (${sentToday} sent today). Sleeping.`);
-          db.close();
-          return resolve(null);
-        }
-
-        // Fetch one pending lead
-        db.get(
-          `SELECT phone FROM campaign_leads
-           WHERE status = 'pending' AND website_status = 'No Website'
-           LIMIT 1`,
-          [],
-          (err2, lead) => {
+          if (sentToday >= dailyLimit) {
+            log(`Daily limit of ${dailyLimit} reached (${sentToday} sent today). Sleeping.`);
             db.close();
-            if (err2) return reject(err2);
-            resolve(lead ? lead.phone : null);
+            return resolve(null);
           }
-        );
-      }
-    );
+
+          // Step 3 — Atomic claim: BEGIN IMMEDIATE prevents two workers from
+          // reading the same pending lead simultaneously.
+          db.run('BEGIN IMMEDIATE', (beginErr) => {
+            if (beginErr) {
+              // Another worker has the lock right now — back off
+              db.close();
+              return resolve(null);
+            }
+
+            db.get(
+              `SELECT phone FROM campaign_leads
+               WHERE status = 'pending' AND website_status = 'No Website'
+               LIMIT 1`,
+              [],
+              (fetchErr, lead) => {
+                if (fetchErr || !lead) {
+                  db.run('ROLLBACK');
+                  db.close();
+                  return fetchErr ? reject(fetchErr) : resolve(null);
+                }
+
+                // Claim it — no other worker can read this row as pending now
+                db.run(
+                  `UPDATE campaign_leads SET status = 'in_progress', claimed_at = datetime('now')
+                   WHERE phone = ?`,
+                  [lead.phone],
+                  (updateErr) => {
+                    if (updateErr) {
+                      db.run('ROLLBACK');
+                      db.close();
+                      return reject(updateErr);
+                    }
+                    db.run('COMMIT', (commitErr) => {
+                      db.close();
+                      if (commitErr) return reject(commitErr);
+                      resolve(lead.phone);
+                    });
+                  }
+                );
+              }
+            );
+          });
+        }
+      );
+    });
   });
 }
 
@@ -121,10 +164,13 @@ async function run() {
 
     log(`→ Firing message to ${phone}`);
     try {
-      // fire_whatsapp.js handles its own composing delay + post-send delay
+      // fire_whatsapp.js handles: presence delay, pre-send check, sending,
+      // DB update (sent/replied/skipped), and the 3-7 min post-send delay.
       execSync(`node fire_whatsapp.js ${phone}`, { stdio: 'inherit' });
     } catch (err) {
-      // fire_whatsapp.js itself marks the lead as 'failed' and exits with code 1
+      // Exit code 1: fire_whatsapp.js already marked the lead as 'failed'.
+      // The watchdog in getNextLead() will clean up any 'in_progress' records
+      // that outlive 15 minutes if something crashes mid-script.
       log(`[WARNING] fire_whatsapp.js exited non-zero for ${phone} — lead marked failed, continuing.`);
     }
     // No extra sleep here — fire_whatsapp.js already waits 3–7 minutes

@@ -4,14 +4,32 @@ services:
   campaign:
     build: .
     container_name: yourbusiness_campaign
-    restart: unless-stopped          # auto-restarts if it crashes; stops only on explicit `docker compose down`
-    env_file: .env                   # API key + Evolution API config
+    restart: unless-stopped
+    env_file: .env
     volumes:
-      # Mount the SQLite database from the host so data persists across restarts
       - ./data.sqlite:/app/data.sqlite
-    # Optional: forward logs to a file on host
+    # Run migrations first, then start the campaign loop
+    command: sh -c "node migrate.js && node campaign_loop.js"
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
+        max-file: "3"
+
+  poller:
+    build: .
+    container_name: yourbusiness_poller
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Set to "true" to send a one-time acknowledgement when a customer replies
+      ENABLE_AUTO_REPLY: "false"
+    volumes:
+      # Shares the SAME database file as the campaign service
+      - ./data.sqlite:/app/data.sqlite
+    command: node reply_poller.js
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
         max-file: "3"
